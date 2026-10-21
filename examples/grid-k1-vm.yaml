@@ -1,0 +1,31 @@
+# ukrsweep grid for the K1's vm 2vx14 (ukrconfig/rvv/fma_vf/dgemm.yaml)
+#
+#   ukrsweep ukrconfig/rvv/fma_vf/dgemm.yaml --family vm --size 2x14 \
+#       --grid grid-k1-vm.yaml --sample 40 \
+#       --remote k1:/tmp --cc riscv64-linux-gnu-gcc \
+#       --cflags "-O2 -march=rv64gcv -static"
+#
+# Each key is a family key (as in the family file) or a flow parameter, with
+# a list of values; null removes the option. Every combination is built, or
+# --sample N of them at random: here 3 x 3 x 3 x 2 x 2 = 108 combinations.
+
+# the issue model - what the scheduler thinks the core issues a cycle
+sched-cycle-slots:
+  - "2:vl|vs|vf,sl,i"
+  - "2:vf,vl|vs|vf,sl,sl,i;vf-sl"
+  - "3:vf|vs|vf,vl|vs|vf,sl,sl,i;vf-sl"
+
+# distances between dependent instructions (cycles, with an issue model)
+schedule:
+  - ["RAW:data::::13", "WAW:data::::13", "WAR:data::::13", "RAW:address:greg:::3"]
+  - ["RAW:data:freg:::6", "RAW:data:vreg:::12", "WAW:data::::20", "WAR:data::::5", "RAW:address:greg:::6"]
+  - ["RAW:data:freg:::7", "RAW:data:vreg:::7", "WAR:data::::8", "RAW:address:greg:::6"]
+
+# the vector unit's queue: none, or kept fed up to 5 or 8
+buckets: [null, "vf:5", "vf:8"]
+
+# the microtile's operation order (null: the family's)
+order: [null, kmn]
+
+# the k loop unrolled: two sets of B's scalars, as the hand-tuned kernel, or four
+unroll: [2, 4]

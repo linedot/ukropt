@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ukropt"
+version = "0.1.0"
+description = "Scripts for tuning ukrgen's settings by measuring generated microkernels"
+readme = "README.md"
+requires-python = ">=3.10"
+# ukrgen and asmgen are installed alongside, from their own checkouts - not
+# declared here: PyPI's "asmgen" is an unrelated package
+dependencies = ["PyYAML"]
+
+[project.scripts]
+ukropt-sweep = "ukropt.sweep:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ukropt"]
