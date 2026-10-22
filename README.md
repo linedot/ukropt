@@ -54,6 +54,14 @@ Options:
   (`--perf-backend perf|papi|m1|simple`, `--event`, `--cxx`) instead of the
   built-in perf_event_open timer (wall-clock where counters aren't there).
 
+- `--cpu N` - measure on core N: the benchmark pins itself
+  (sched_setaffinity, inherited by the variants' processes). On the K1 the
+  two clusters differ by a few cycles a k step - compare on one core.
+- `--repeat N` - the benchmark run N times, each point the median of its
+  runs.
+- `--max-residual P` (default 2) - fits whose worst residual exceeds P
+  percent are marked `?` and not chosen best: their points aren't a line.
+
 Each variant runs in a child process of its own: one that crashes is
 reported (variant, offset, signal) and the others still run.
 

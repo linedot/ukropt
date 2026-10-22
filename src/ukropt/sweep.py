@@ -26,6 +26,7 @@ import itertools
 import os
 import random
 import re
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -96,6 +97,15 @@ int main(int argc, char** argv)
 {
     int nk = argc - 1, ks[64];
     for (int i = 0; i < nk && i < 64; ++i) ks[i] = atoi(argv[i + 1]);
+    /* pinned where asked (UKRSWEEP_CPU): the children inherit it */
+    const char *cpu = getenv("UKRSWEEP_CPU");
+    if (cpu && *cpu) {
+        cpu_set_t set;
+        CPU_ZERO(&set);
+        CPU_SET(atoi(cpu), &set);
+        if (sched_setaffinity(0, sizeof set, &set))
+            perror("sched_setaffinity");
+    }
     /* each variant measured in a child of its own (a counter of its own):
        a variant that crashes is reported, the others still run */
 #ifdef USE_PCLIB
@@ -195,6 +205,13 @@ def main():
                    help="values of k to time, a line fitted through them - keep A's and B's panels "
                         "((MR+NR) x k elements) in L1")
     p.add_argument("-j", "--jobs", type=int, default=os.cpu_count(), help="variants built in parallel")
+    p.add_argument("--cpu", type=int, default=None,
+                   help="the core to measure on (the benchmark pins itself; on the K1 the "
+                        "clusters differ by a few cycles a k step - compare on one core)")
+    p.add_argument("--repeat", type=int, default=1,
+                   help="the benchmark run this many times, each point its median")
+    p.add_argument("--max-residual", type=float, default=2.0,
+                   help="fits with a worse residual (percent) are marked ? and not chosen best")
     p.add_argument("--align", default="0",
                    help="byte offsets from a 64-byte boundary to place each kernel at (multiples of 4: "
                         "0,4,8,16,32): each variant measured at each, best and worst reported - how much "
@@ -251,7 +268,7 @@ def main():
                          f'WIFSIGNALED(st) ? WTERMSIG(st) : WEXITSTATUS(st)); fflush(stdout); }} }}')
     helpers = "".join(dict.fromkeys(helpers))
     stub = blis_stub()
-    driver = (f"#define WT {ctype}\n" + stub + helpers
+    driver = ("#define _GNU_SOURCE\n#include <sched.h>\n#include <stdlib.h>\n" + f"#define WT {ctype}\n" + stub + helpers
               + "".join(wrappers) + DRIVER.replace("VARIANTS", "\n".join(calls)))
     with open(os.path.join(args.out, "driver.c"), "w") as f:
         f.write(driver)
@@ -292,23 +309,33 @@ def main():
         r = subprocess.run(["scp", exe, f"{host}:{where}/ukrsweep_bench"], capture_output=True, text=True)
         if r.returncode:
             sys.exit(f"scp failed: {r.stderr}")
-        r = subprocess.run(["ssh", host, f"{where}/ukrsweep_bench {' '.join(ks)}"],
-                           capture_output=True, text=True, timeout=3600)
-        if r.returncode:
-            print(f"ssh run ended with status {r.returncode}: {r.stderr.strip() or '(nothing on stderr)'}"
-                  " - the results it printed follow", file=sys.stderr)
-        out = r.stdout
-    else:
-        out = subprocess.run([exe, *ks], capture_output=True, text=True, timeout=3600).stdout
+    pin = f"UKRSWEEP_CPU={args.cpu} " if args.cpu is not None else ""
+    env = dict(os.environ, **({"UKRSWEEP_CPU": str(args.cpu)} if args.cpu is not None else {}))
+    outs = []
+    for _ in range(max(1, args.repeat)):
+        if args.remote:
+            r = subprocess.run(["ssh", host, f"cd {where} && {pin}./ukrsweep_bench {' '.join(ks)}"],
+                               capture_output=True, text=True, timeout=3600)
+            if r.returncode:
+                print(f"ssh run ended with status {r.returncode}: {r.stderr.strip() or '(nothing on stderr)'}"
+                      " - the results it printed follow", file=sys.stderr)
+            outs.append(r.stdout)
+        else:
+            outs.append(subprocess.run([exe, *ks], capture_output=True, text=True, timeout=3600,
+                                       env=env).stdout)
+    out = "\n".join(outs)
     for i, o, sig in re.findall(r"crashed (\d+) (\d+) (-?\d+)", out):
         print(f"variant {i} at offset {o}: crashed (signal or status {sig})", file=sys.stderr)
     found = re.search(r"# unit (\w+)", out)
     if not found:
         sys.exit("the benchmark printed nothing")
     unit = found.group(1)
-    points = {}
+    # each point the median of its runs (--repeat)
+    raw = {}
     for i, o, k, t in re.findall(r"variant (\d+) (\d+) (\d+) ([-\d.]+)", out):
-        points.setdefault((int(i), int(o)), []).append((int(k), float(t)))
+        raw.setdefault((int(i), int(o)), {}).setdefault(int(k), []).append(float(t))
+    points = {key: [(k, statistics.median(ts)) for k, ts in sorted(per.items())]
+              for key, per in raw.items()}
     fits = {}
     for (i, o), pts in points.items():
         # least squares: t = call + step * k; the worst residual says whether
@@ -328,10 +355,16 @@ def main():
     many = len(offsets) > 1
     print(f"{unit} per k step" + (" (best at offset .. worst)" if many else "")
           + " | per call outside the loop | worst residual | settings")
+    limit = args.max_residual / 100
     for best_, worst_, call, resid, at, i in rows:
         spread = f" @{at:<3} .. {worst_:7.2f}" if many else ""
-        print(f"{best_:10.2f}{spread} | {call:10.1f} | {100 * resid:5.1f}% | {settings[i]}")
-    print("best:\n" + yaml.safe_dump(settings[rows[0][5]], sort_keys=False))
+        flag = "?" if resid > limit else " "
+        print(f"{best_:10.2f}{spread} | {call:10.1f} | {100 * resid:5.1f}%{flag}| {settings[i]}")
+    if any(r[3] > limit for r in rows):
+        print(f"? a residual above {args.max_residual}%: the points aren't a line - not chosen best "
+              "(--repeat, --cpu)")
+    trusted = [r for r in rows if r[3] <= limit] or rows
+    print("best:\n" + yaml.safe_dump(settings[trusted[0][5]], sort_keys=False))
 
 
 if __name__ == "__main__":
