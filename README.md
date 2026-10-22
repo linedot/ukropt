@@ -89,7 +89,8 @@ Microbenchmarks generated through asmgen: an experiment is written once, in
 ISA-neutral roles, and runs on every ISA asmgen has (RVV, NEON, SVE, AVX2,
 AVX-512, ...). The built-in experiments measure FMA throughput by the number
 of vector sources, FMA latency (dependency chains), and FMAs mixed with
-scalar loads, vector loads and integer adds at several ratios:
+scalar loads, vector loads and integer adds at several ratios, and vector
+loads close to their readers (RAW) or to the reads they overwrite (WAR):
 
 ```
 ukropt-pairs rvv --cc riscv64-linux-gnu-gcc --cflags "-O2 -march=rv64gcv -static" \

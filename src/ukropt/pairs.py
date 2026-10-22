@@ -65,14 +65,26 @@ BUILTIN = {
                    ["fma c{i%C} a{i%2} s{i%S}", {"op": "sload t{i%T} {8*(i%T)}", "every": 2}], 32),
     "fma+sload-war": ("an FMA and a scalar load in turn, loads into the operands, read S/2 FMAs on",
                       ["fma c{i%C} a{i%2} s{i%S}", "sload s{(i+S//2)%S} {8*(i%S)}"], 32),
+    # the loads' targets alternate: no load waits for the previous one's
+    # write to the same register
     "fma+vload/2": ("a vector load per two FMAs (loaded registers unread)",
-                    ["fma c{i%C} a{i%2} s{i%S}", {"op": "vload v{i%2}", "every": 2}], 32),
+                    ["fma c{i%C} a{i%2} s{i%S}", {"op": "vload v{(i//2)%2}", "every": 2}], 32),
     "fma+vload/4": ("a vector load per four FMAs",
-                    ["fma c{i%C} a{i%2} s{i%S}", {"op": "vload v{i%2}", "every": 4}], 32),
+                    ["fma c{i%C} a{i%2} s{i%S}", {"op": "vload v{(i//4)%2}", "every": 4}], 32),
     "fma+vload/8": ("a vector load per eight FMAs",
-                    ["fma c{i%C} a{i%2} s{i%S}", {"op": "vload v{i%2}", "every": 8}], 32),
+                    ["fma c{i%C} a{i%2} s{i%S}", {"op": "vload v{(i//8)%2}", "every": 8}], 32),
     "fma+vload/16": ("a vector load per sixteen FMAs",
-                     ["fma c{i%C} a{i%2} s{i%S}", {"op": "vload v{i%2}", "every": 16}], 32),
+                     ["fma c{i%C} a{i%2} s{i%S}", {"op": "vload v{(i//16)%2}", "every": 16}], 32),
+    "fma+vload/2-1reg": ("as fma+vload/2, every load into one register: loads chained on it",
+                         ["fma c{i%C} a{i%2} s{i%S}", {"op": "vload v0", "every": 2}], 32),
+    # groups of four FMAs reading one vector source, a load after each group:
+    # where it lands against its readers
+    "vload-raw-near": ("a group of 4 FMAs reads the vector loaded right before it (RAW: 1 instr.)",
+                       ["fma c{i%C} v{(i//4)%2} s{i%S}", {"op": "vload v{(i//4+1)%2}", "every": 4}], 32),
+    "vload-war-near": ("a load overwrites the vector its group of 4 FMAs just read (WAR: 1 instr.)",
+                       ["fma c{i%C} v{(i//4)%2} s{i%S}", {"op": "vload v{(i//4)%2}", "every": 4}], 32),
+    "vload-far": ("as the two above, load and readers two groups apart both ways",
+                  ["fma c{i%C} v{(i//4)%4} s{i%S}", {"op": "vload v{(i//4+2)%4}", "every": 4}], 32),
     "fma+iadd": ("an FMA and an integer add in turn",
                  ["fma c{i%C} a{i%2} s{i%S}", "iadd g{i%2} 8"], 32),
 }
