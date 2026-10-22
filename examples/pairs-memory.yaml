@@ -1,0 +1,121 @@
+# ukropt-pairs experiments: does where and in which order a kernel loads
+# cost? Run with --vector-bytes on RVV and SVE (VLEN/8: 32 on the K1, 128 on
+# the K3's A100 cores):
+#
+#   ukropt-pairs rvv --experiments examples/pairs-memory.yaml --vector-bytes 128 ...
+#
+# 1. place-*: an FMA and a scalar load in turn (the loads at 1:1 cost where
+#    they can't pair). Scalar loads with an offset of 128 or more were slow
+#    on the K1 and the A100, but those experiments moved immediates and
+#    addresses together. Here a pointer separates them:
+#      p128 slow                 - the addresses (the buffer's bytes 128..255)
+#      p128 fast, p64 slow       - a load leaving its base's 128-byte block
+#      p128 fast, p64 fast       - the immediate itself
+#
+# 2. stream-2vx14-*: four k steps of 2v x 14 per loop, A and B each in a
+#    region of its own and advancing as in a kernel (A by two vectors, B by
+#    14 scalars per k step; back after four steps: all in L1). Only where the
+#    two A loads sit among the 14 B loads differs; -hot is the same code
+#    with nothing moving - every load on the same lines, as in the mixes.
+#      split, together, scattered against hot - what streaming costs
+#      together against split and scattered  - what switching streams costs
+
+place-p0-off0-120:
+  about: "scalar loads through p0 = buffer, offsets 0..120: the fast reference"
+  pointers: {p0: 0}
+  repeat: 16
+  body:
+    - "fma c{i%C} a{i%2} s{i%S}"
+    - "sload t{i%T} {8*i} p0"
+
+place-p0-off128-248:
+  about: "through p0 = buffer, offsets 128..248: the slow reference"
+  pointers: {p0: 0}
+  repeat: 16
+  body:
+    - "fma c{i%C} a{i%2} s{i%S}"
+    - "sload t{i%T} {128+8*i} p0"
+
+place-p128-off0-120:
+  about: "the slow reference's addresses through p0 = buffer + 128, offsets 0..120"
+  pointers: {p0: 128}
+  repeat: 16
+  body:
+    - "fma c{i%C} a{i%2} s{i%S}"
+    - "sload t{i%T} {8*i} p0"
+
+place-p64-off0-120:
+  about: "p0 = buffer + 64, offsets 0..120: from offset 64 on in the next 128-byte block"
+  pointers: {p0: 64}
+  repeat: 16
+  body:
+    - "fma c{i%C} a{i%2} s{i%S}"
+    - "sload t{i%T} {8*i} p0"
+
+stream-2vx14-hot:
+  about: "the stream code with nothing moving: every load on the same lines, as in the mixes"
+  pointers: {p0: 0, p1: "{VB}", p2: 0}
+  repeat: 56
+  body:
+    - "fma c{(2*(i%14))%C} a0 s{(i%14)%S}"
+    - "fma c{(2*(i%14)+1)%C} a1 s{(i%14)%S}"
+    - "sload t{(i%14)%T} {8*(i%14)} p2"
+    - {op: "vload v0 p0", when: "i%14 == 6"}
+    - {op: "vload v1 p1", when: "i%14 == 13"}
+    - {op: "iadd g0 {2*VB}", when: "i%14 == 13"}
+    - {op: "iadd g1 {2*VB}", when: "i%14 == 13"}
+    - {op: "iadd g2 112", when: "i%14 == 13"}
+    - {op: "iadd g0 {-8*VB}", when: "i == 55"}
+    - {op: "iadd g1 {-8*VB}", when: "i == 55"}
+    - {op: "iadd g2 -448", when: "i == 55"}
+
+stream-2vx14-split:
+  about: "A and B advancing in their own regions; A loads after B loads 7 and 14 (as the mixes)"
+  pointers: {p0: 0, p1: "{VB}", p2: 1050624}
+  repeat: 56
+  body:
+    - "fma c{(2*(i%14))%C} a0 s{(i%14)%S}"
+    - "fma c{(2*(i%14)+1)%C} a1 s{(i%14)%S}"
+    - "sload t{(i%14)%T} {8*(i%14)} p2"
+    - {op: "vload v0 p0", when: "i%14 == 6"}
+    - {op: "vload v1 p1", when: "i%14 == 13"}
+    - {op: "iadd p0 {2*VB}", when: "i%14 == 13"}
+    - {op: "iadd p1 {2*VB}", when: "i%14 == 13"}
+    - {op: "iadd p2 112", when: "i%14 == 13"}
+    - {op: "iadd p0 {-8*VB}", when: "i == 55"}
+    - {op: "iadd p1 {-8*VB}", when: "i == 55"}
+    - {op: "iadd p2 -448", when: "i == 55"}
+
+stream-2vx14-together:
+  about: "as -split, both A loads after B load 14: one switch from B to A per k step"
+  pointers: {p0: 0, p1: "{VB}", p2: 1050624}
+  repeat: 56
+  body:
+    - "fma c{(2*(i%14))%C} a0 s{(i%14)%S}"
+    - "fma c{(2*(i%14)+1)%C} a1 s{(i%14)%S}"
+    - "sload t{(i%14)%T} {8*(i%14)} p2"
+    - {op: "vload v0 p0", when: "i%14 == 13"}
+    - {op: "vload v1 p1", when: "i%14 == 13"}
+    - {op: "iadd p0 {2*VB}", when: "i%14 == 13"}
+    - {op: "iadd p1 {2*VB}", when: "i%14 == 13"}
+    - {op: "iadd p2 112", when: "i%14 == 13"}
+    - {op: "iadd p0 {-8*VB}", when: "i == 55"}
+    - {op: "iadd p1 {-8*VB}", when: "i == 55"}
+    - {op: "iadd p2 -448", when: "i == 55"}
+
+stream-2vx14-scattered:
+  about: "as -split, A loads after B loads 3 and 8: 3 B, A, 5 B, A, 6 B"
+  pointers: {p0: 0, p1: "{VB}", p2: 1050624}
+  repeat: 56
+  body:
+    - "fma c{(2*(i%14))%C} a0 s{(i%14)%S}"
+    - "fma c{(2*(i%14)+1)%C} a1 s{(i%14)%S}"
+    - "sload t{(i%14)%T} {8*(i%14)} p2"
+    - {op: "vload v0 p0", when: "i%14 == 2"}
+    - {op: "vload v1 p1", when: "i%14 == 7"}
+    - {op: "iadd p0 {2*VB}", when: "i%14 == 13"}
+    - {op: "iadd p1 {2*VB}", when: "i%14 == 13"}
+    - {op: "iadd p2 112", when: "i%14 == 13"}
+    - {op: "iadd p0 {-8*VB}", when: "i == 55"}
+    - {op: "iadd p1 {-8*VB}", when: "i == 55"}
+    - {op: "iadd p2 -448", when: "i == 55"}

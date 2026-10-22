@@ -126,6 +126,15 @@ experiment needing more registers than the ISA has is reported. `{...}` is
 an expression of `i` and of `C S T`, the accumulators and scalar operands
 there is room for (16, 8, 4 with 32 vector registers; 8, 4, 2 with 16).
 
+Loads can go through pointers instead of the buffer's start (2 MB):
+`vload V P`, `sload S OFFSET P`, with `p` registers set before the loop to
+the buffer plus `pointers: {p0: OFFSET}` and moved with `iadd`. `when:` places
+an entry by an expression of `i` (`{op: "vload v0 p0", when: "i%14 == 6"}`),
+and `{VB}` is a vector's bytes - fixed on NEON and x86, `--vector-bytes` on
+RVV and SVE. `examples/pairs-memory.yaml` uses them: where scalar loads with
+large offsets cost, and whether streaming through A and B, or switching
+between them, costs what the mixes don't show.
+
 Each loop runs n and 2n iterations; the difference per iteration counts, the
 call's cost gone. The building, running and counting options are
 ukropt-sweep's (`--cpu`, `--runs`, `--use-prologue`, `--remote`,
