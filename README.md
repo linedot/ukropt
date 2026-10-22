@@ -57,8 +57,12 @@ Options:
 - `--cpu N` - measure on core N: the benchmark pins itself
   (sched_setaffinity, inherited by the variants' processes). On the K1 the
   two clusters differ by a few cycles a k step - compare on one core.
-- `--repeat N` - the benchmark run N times, each point the median of its
-  runs.
+- `--measurements N` (default 20; formerly `--reps`) - timed measurements
+  per variant and k in one run, the fastest kept.
+- `--iterations N` (default 64) - kernel calls back to back in one
+  measurement.
+- `--runs N` (default 1; formerly `--repeat`) - the whole benchmark run N
+  times, each point the median of the runs' fastest.
 - `--max-residual P` (default 2) - fits whose worst residual exceeds P
   percent are marked `?` and not chosen best: their points aren't a line.
 

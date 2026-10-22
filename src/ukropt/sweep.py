@@ -82,12 +82,12 @@ static double best(ukr_t f, dim_t mr, dim_t nr, dim_t k, const WT* a, const WT* 
     for (int r = 0; r < reps; ++r) {
 #ifdef USE_PCLIB
         pc_tic();
-        for (int i = 0; i < 64; ++i) f(mr, nr, k, &alpha, a, b, &beta, c, 1, mr, NULL, NULL);
-        double d = (double)pc_toc() / 64;
+        for (int i = 0; i < ITERS; ++i) f(mr, nr, k, &alpha, a, b, &beta, c, 1, mr, NULL, NULL);
+        double d = (double)pc_toc() / ITERS;
 #else
         double t0 = now();
-        for (int i = 0; i < 64; ++i) f(mr, nr, k, &alpha, a, b, &beta, c, 1, mr, NULL, NULL);
-        double d = (now() - t0) / 64;
+        for (int i = 0; i < ITERS; ++i) f(mr, nr, k, &alpha, a, b, &beta, c, 1, mr, NULL, NULL);
+        double d = (now() - t0) / ITERS;
 #endif
         if (d < t) t = d;
     }
@@ -208,15 +208,19 @@ def main():
     p.add_argument("--cpu", type=int, default=None,
                    help="the core to measure on (the benchmark pins itself; on the K1 the "
                         "clusters differ by a few cycles a k step - compare on one core)")
-    p.add_argument("--repeat", type=int, default=1,
-                   help="the benchmark run this many times, each point its median")
+    p.add_argument("--runs", "--repeat", dest="repeat", type=int, default=1,
+                   help="the whole benchmark run this many times, each point the median of "
+                        "the runs' fastest")
     p.add_argument("--max-residual", type=float, default=2.0,
                    help="fits with a worse residual (percent) are marked ? and not chosen best")
     p.add_argument("--align", default="0",
                    help="byte offsets from a 64-byte boundary to place each kernel at (multiples of 4: "
                         "0,4,8,16,32): each variant measured at each, best and worst reported - how much "
                         "of a difference is placement")
-    p.add_argument("--reps", type=int, default=20)
+    p.add_argument("--measurements", "--reps", dest="reps", type=int, default=20,
+                   help="timed measurements per variant and k in a run, the fastest kept")
+    p.add_argument("--iterations", type=int, default=64,
+                   help="kernel calls back to back in one measurement")
     p.add_argument("--out", default="ukrsweep")
     p.add_argument("--build-only", action="store_true", help="build the binary, run it elsewhere")
     p.add_argument("--remote", default=None,
@@ -268,7 +272,7 @@ def main():
                          f'WIFSIGNALED(st) ? WTERMSIG(st) : WEXITSTATUS(st)); fflush(stdout); }} }}')
     helpers = "".join(dict.fromkeys(helpers))
     stub = blis_stub()
-    driver = ("#define _GNU_SOURCE\n#include <sched.h>\n#include <stdlib.h>\n" + f"#define WT {ctype}\n" + stub + helpers
+    driver = ("#define _GNU_SOURCE\n#include <sched.h>\n#include <stdlib.h>\n" + f"#define WT {ctype}\n#define ITERS {args.iterations}\n" + stub + helpers
               + "".join(wrappers) + DRIVER.replace("VARIANTS", "\n".join(calls)))
     with open(os.path.join(args.out, "driver.c"), "w") as f:
         f.write(driver)
@@ -362,7 +366,7 @@ def main():
         print(f"{best_:10.2f}{spread} | {call:10.1f} | {100 * resid:5.1f}%{flag}| {settings[i]}")
     if any(r[3] > limit for r in rows):
         print(f"? a residual above {args.max_residual}%: the points aren't a line - not chosen best "
-              "(--repeat, --cpu)")
+              "(--runs, --cpu)")
     trusted = [r for r in rows if r[3] <= limit] or rows
     print("best:\n" + yaml.safe_dump(settings[trusted[0][5]], sort_keys=False))
 
