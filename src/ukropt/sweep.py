@@ -93,8 +93,13 @@ static double best(ukr_t f, dim_t mr, dim_t nr, dim_t k, const WT* a, const WT* 
     }
     return t;
 }
+#ifndef UKRSWEEP_PROLOGUE
+#define UKRSWEEP_PROLOGUE(argc, argv) ((void)0)
+#endif
 int main(int argc, char** argv)
 {
+    /* a core's preparation, first of all (--use-prologue) */
+    UKRSWEEP_PROLOGUE(argc, argv);
     int nk = argc - 1, ks[64];
     for (int i = 0; i < nk && i < 64; ++i) ks[i] = atoi(argv[i + 1]);
     /* pinned where asked (UKRSWEEP_CPU): the children inherit it */
@@ -131,6 +136,25 @@ VARIANTS
     return 0;
 }
 """
+
+
+def load_prologue(name: str | None) -> str:
+    """
+    A prologue for the benchmark (--use-prologue): ukropt/prologues/NAME.h,
+    or a header by path. It defines UKRSWEEP_PROLOGUE(argc, argv), which the
+    benchmark's main runs first
+    """
+    if not name:
+        return ""
+    if os.sep in name or name.endswith(".h"):
+        return open(name).read() + "\n"
+    from importlib.resources import files
+    here = files("ukropt") / "prologues"
+    path = here / f"{name}.h"
+    if not path.is_file():
+        known = sorted(p.name[:-2] for p in here.iterdir() if p.name.endswith(".h"))
+        sys.exit(f"no prologue {name!r}: there are {', '.join(known)} (or give a header's path)")
+    return path.read_text() + "\n"
 
 
 def blis_stub() -> str:
@@ -205,9 +229,15 @@ def main():
                    help="values of k to time, a line fitted through them - keep A's and B's panels "
                         "((MR+NR) x k elements) in L1")
     p.add_argument("-j", "--jobs", type=int, default=os.cpu_count(), help="variants built in parallel")
-    p.add_argument("--cpu", type=int, default=None,
-                   help="the core to measure on (the benchmark pins itself; on the K1 the "
-                        "clusters differ by a few cycles a k step - compare on one core)")
+    p.add_argument("--cpu", default=None,
+                   help="the core(s) to measure on, 1 or 1,5 (the benchmark pins itself; on the "
+                        "K1 the clusters differ by a few cycles a k step)")
+    p.add_argument("--rank", default=None,
+                   help="with several cores, rank by: mean (default), max (the worst core), min, "
+                        "or a core's number")
+    p.add_argument("--use-prologue", default=None,
+                   help="prepare the core first: a name in ukropt/prologues (k3_ai: the K3's AI "
+                        "cores) or a header's path defining UKRSWEEP_PROLOGUE(argc, argv)")
     p.add_argument("--runs", "--repeat", dest="repeat", type=int, default=1,
                    help="the whole benchmark run this many times, each point the median of "
                         "the runs' fastest")
@@ -272,7 +302,8 @@ def main():
                          f'WIFSIGNALED(st) ? WTERMSIG(st) : WEXITSTATUS(st)); fflush(stdout); }} }}')
     helpers = "".join(dict.fromkeys(helpers))
     stub = blis_stub()
-    driver = ("#define _GNU_SOURCE\n#include <sched.h>\n#include <stdlib.h>\n" + f"#define WT {ctype}\n#define ITERS {args.iterations}\n" + stub + helpers
+    driver = ("#define _GNU_SOURCE\n#include <sched.h>\n#include <stdlib.h>\n"
+              + load_prologue(args.use_prologue) + f"#define WT {ctype}\n#define ITERS {args.iterations}\n" + stub + helpers
               + "".join(wrappers) + DRIVER.replace("VARIANTS", "\n".join(calls)))
     with open(os.path.join(args.out, "driver.c"), "w") as f:
         f.write(driver)
@@ -313,62 +344,97 @@ def main():
         r = subprocess.run(["scp", exe, f"{host}:{where}/ukrsweep_bench"], capture_output=True, text=True)
         if r.returncode:
             sys.exit(f"scp failed: {r.stderr}")
-    pin = f"UKRSWEEP_CPU={args.cpu} " if args.cpu is not None else ""
-    env = dict(os.environ, **({"UKRSWEEP_CPU": str(args.cpu)} if args.cpu is not None else {}))
-    outs = []
-    for _ in range(max(1, args.repeat)):
-        if args.remote:
-            r = subprocess.run(["ssh", host, f"cd {where} && {pin}./ukrsweep_bench {' '.join(ks)}"],
-                               capture_output=True, text=True, timeout=3600)
-            if r.returncode:
-                print(f"ssh run ended with status {r.returncode}: {r.stderr.strip() or '(nothing on stderr)'}"
-                      " - the results it printed follow", file=sys.stderr)
-            outs.append(r.stdout)
-        else:
-            outs.append(subprocess.run([exe, *ks], capture_output=True, text=True, timeout=3600,
-                                       env=env).stdout)
-    out = "\n".join(outs)
-    for i, o, sig in re.findall(r"crashed (\d+) (\d+) (-?\d+)", out):
+    cpus = [int(c) for c in str(args.cpu).split(",") if c.strip()] if args.cpu is not None else [None]
+    rank = args.rank or ("mean" if len(cpus) > 1 else "min")
+    if rank not in ("mean", "max", "min") and not (rank.isdigit() and int(rank) in cpus):
+        sys.exit(f"--rank {rank}: mean, max, min or one of the cores measured ({args.cpu})")
+    runs = {}
+    for cpu in cpus:
+        pin = f"UKRSWEEP_CPU={cpu} " if cpu is not None else ""
+        env = dict(os.environ, **({"UKRSWEEP_CPU": str(cpu)} if cpu is not None else {}))
+        outs = []
+        for _ in range(max(1, args.repeat)):
+            if args.remote:
+                r = subprocess.run(["ssh", host, f"cd {where} && {pin}./ukrsweep_bench {' '.join(ks)}"],
+                                   capture_output=True, text=True, timeout=3600)
+                if r.returncode:
+                    print(f"ssh run (core {cpu}) ended with status {r.returncode}: "
+                          f"{r.stderr.strip() or '(nothing on stderr)'} - the results it printed follow",
+                          file=sys.stderr)
+                outs.append(r.stdout)
+            else:
+                outs.append(subprocess.run([exe, *ks], capture_output=True, text=True, timeout=3600,
+                                           env=env).stdout)
+        runs[cpu] = "\n".join(outs)
+    out = "\n".join(runs.values())
+    for i, o, sig in sorted(set(re.findall(r"crashed (\d+) (\d+) (-?\d+)", out))):
         print(f"variant {i} at offset {o}: crashed (signal or status {sig})", file=sys.stderr)
     found = re.search(r"# unit (\w+)", out)
     if not found:
         sys.exit("the benchmark printed nothing")
     unit = found.group(1)
-    # each point the median of its runs (--repeat)
-    raw = {}
-    for i, o, k, t in re.findall(r"variant (\d+) (\d+) (\d+) ([-\d.]+)", out):
-        raw.setdefault((int(i), int(o)), {}).setdefault(int(k), []).append(float(t))
-    points = {key: [(k, statistics.median(ts)) for k, ts in sorted(per.items())]
-              for key, per in raw.items()}
-    fits = {}
-    for (i, o), pts in points.items():
-        # least squares: t = call + step * k; the worst residual says whether
-        # the points lie on a line (panels out of L1 bend it)
-        nk = len(pts)
-        mk, mt = sum(k for k, _ in pts) / nk, sum(t for _, t in pts) / nk
-        step = sum((k - mk) * (t - mt) for k, t in pts) / max(1e-9, sum((k - mk) ** 2 for k, _ in pts))
-        call = mt - step * mk
-        worst = max(abs(t - (call + step * k)) / max(t, 1e-9) for k, t in pts)
-        fits.setdefault(i, []).append((step, call, worst, o))
-    rows = []
-    for i, f in fits.items():
-        f.sort()
-        rows.append((f[0][0], f[-1][0], f[0][1], max(w for _, _, w, _ in f), f[0][3], i))
-    rows.sort()
+    # per core: each point the median of its runs, a line per variant and
+    # placement - least squares, t = call + step * k, its worst residual -
+    # and per variant its best placement: (step, worst step, call, worst
+    # residual, offset)
+    per_cpu = {}
+    for cpu, text in runs.items():
+        raw = {}
+        for i, o, k, t in re.findall(r"variant (\d+) (\d+) (\d+) ([-\d.]+)", text):
+            raw.setdefault((int(i), int(o)), {}).setdefault(int(k), []).append(float(t))
+        fits = {}
+        for (i, o), per in raw.items():
+            pts = [(k, statistics.median(ts)) for k, ts in sorted(per.items())]
+            nk = len(pts)
+            mk, mt = sum(k for k, _ in pts) / nk, sum(t for _, t in pts) / nk
+            step = sum((k - mk) * (t - mt) for k, t in pts) / max(1e-9, sum((k - mk) ** 2 for k, _ in pts))
+            call = mt - step * mk
+            worst = max(abs(t - (call + step * k)) / max(t, 1e-9) for k, t in pts)
+            fits.setdefault(i, []).append((step, call, worst, o))
+        per_cpu[cpu] = {i: (min(f)[0], max(f)[0], min(f)[1], max(w for _, _, w, _ in f), min(f)[3])
+                        for i, f in fits.items()}
+    variants = sorted(set.intersection(*(set(v) for v in per_cpu.values())))
+    if not variants:
+        sys.exit("no variant measured on every core")
+
+    def score(i):
+        steps = [per_cpu[c][i][0] for c in cpus]
+        if "mean" == rank:
+            return sum(steps) / len(steps)
+        if "max" == rank:
+            return max(steps)
+        if "min" == rank:
+            return min(steps)
+        return per_cpu[int(rank)][i][0]
+
     settings = {r["i"]: r["settings"] for r in built}
-    many = len(offsets) > 1
-    print(f"{unit} per k step" + (" (best at offset .. worst)" if many else "")
-          + " | per call outside the loop | worst residual | settings")
     limit = args.max_residual / 100
-    for best_, worst_, call, resid, at, i in rows:
-        spread = f" @{at:<3} .. {worst_:7.2f}" if many else ""
-        flag = "?" if resid > limit else " "
-        print(f"{best_:10.2f}{spread} | {call:10.1f} | {100 * resid:5.1f}%{flag}| {settings[i]}")
-    if any(r[3] > limit for r in rows):
+    resid = {i: max(per_cpu[c][i][3] for c in cpus) for i in variants}
+    rows = sorted(variants, key=score)
+    many, multi = len(offsets) > 1, len(cpus) > 1
+    if multi:
+        cols = " | ".join(f"core {c}" + (" @best offset" if many else "") for c in cpus)
+        print(f"{unit} per k step, {rank} over cores | {cols} | per call outside the loop | "
+              "worst residual | settings")
+    else:
+        print(f"{unit} per k step" + (" (best at offset .. worst)" if many else "")
+              + " | per call outside the loop | worst residual | settings")
+    for i in rows:
+        flag = "?" if resid[i] > limit else " "
+        if multi:
+            cols = " | ".join(f"{per_cpu[c][i][0]:7.2f}" + (f" @{per_cpu[c][i][4]:<3}" if many else "")
+                              for c in cpus)
+            call = sum(per_cpu[c][i][2] for c in cpus) / len(cpus)
+            print(f"{score(i):10.2f} | {cols} | {call:10.1f} | {100 * resid[i]:5.1f}%{flag}| {settings[i]}")
+        else:
+            best_, worst_, call, _, at = per_cpu[cpus[0]][i]
+            spread = f" @{at:<3} .. {worst_:7.2f}" if many else ""
+            print(f"{best_:10.2f}{spread} | {call:10.1f} | {100 * resid[i]:5.1f}%{flag}| {settings[i]}")
+    if any(resid[i] > limit for i in variants):
         print(f"? a residual above {args.max_residual}%: the points aren't a line - not chosen best "
               "(--runs, --cpu)")
-    trusted = [r for r in rows if r[3] <= limit] or rows
-    print("best:\n" + yaml.safe_dump(settings[trusted[0][5]], sort_keys=False))
+    trusted = [i for i in rows if resid[i] <= limit] or rows
+    print("best:\n" + yaml.safe_dump(settings[trusted[0]], sort_keys=False))
 
 
 if __name__ == "__main__":

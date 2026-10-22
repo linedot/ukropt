@@ -54,9 +54,20 @@ Options:
   (`--perf-backend perf|papi|m1|simple`, `--event`, `--cxx`) instead of the
   built-in perf_event_open timer (wall-clock where counters aren't there).
 
-- `--cpu N` - measure on core N: the benchmark pins itself
-  (sched_setaffinity, inherited by the variants' processes). On the K1 the
-  two clusters differ by a few cycles a k step - compare on one core.
+- `--cpu N` or `--cpu 1,5` - measure on those cores: the benchmark pins
+  itself (sched_setaffinity, inherited by the variants' processes), once
+  per core. On the K1 the two clusters differ by a few cycles a k step, in
+  either direction depending on the kernel.
+- `--rank mean|max|min|N` - with several cores, rank by the mean (the
+  default), the worst core (`max`: a kernel good everywhere), the best, or
+  one core; the table has a column per core.
+- `--use-prologue NAME` - prepare the core before anything else runs:
+  `src/ukropt/prologues/NAME.h`, or a header's path. A prologue defines
+  `UKRSWEEP_PROLOGUE(argc, argv)`, which the benchmark's main runs first.
+  `k3_ai`: the SpacemiT K3's AI cores (8-15) - the benchmark registers its
+  PID with `/proc/set_ai_thread` and re-executes itself, so nothing has
+  used the vector unit before (as https://github.com/brucehoult/k3_ai does);
+  then `--cpu 8` and on.
 - `--measurements N` (default 20; formerly `--reps`) - timed measurements
   per variant and k in one run, the fastest kept.
 - `--iterations N` (default 64) - kernel calls back to back in one
