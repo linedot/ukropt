@@ -82,3 +82,50 @@ reported (variant, offset, signal) and the others still run.
 
 The BLIS declarations the wrappers compile against come from ukrgen where it
 ships them, else from the copy in `src/ukropt/data/blis_stub.h`.
+
+## ukropt-pairs - how a core executes instruction mixes
+
+Microbenchmarks generated through asmgen: an experiment is written once, in
+ISA-neutral roles, and runs on every ISA asmgen has (RVV, NEON, SVE, AVX2,
+AVX-512, ...). The built-in experiments measure FMA throughput by the number
+of vector sources, FMA latency (dependency chains), and FMAs mixed with
+scalar loads, vector loads and integer adds at several ratios:
+
+```
+ukropt-pairs rvv --cc riscv64-linux-gnu-gcc --cflags "-O2 -march=rv64gcv -static" \
+    --remote host:/tmp --cpu 8,11 --use-prologue k3_ai
+ukropt-pairs avx512 --only "fma*,chain-*"          # native
+ukropt-pairs neon --list                           # the experiments
+```
+
+It reports per experiment the cycles per loop iteration on each core, cycles
+per FMA and instructions per cycle. `--show-asm` prints each loop.
+
+Experiments of your own go in a YAML file (`--experiments`); see
+`examples/pairs-gemm-mixes.yaml`, the instruction mixes of GEMM microkernels
+without dependences - a kernel's cycles per k step against its mix's:
+
+```yaml
+mix-2vx14:
+  about: "28 FMAs, 14 scalar loads, 2 vector loads"
+  repeat: 14                       # the body expanded for i = 0..13
+  body:
+    - "fma c{(2*i)%C} a0 s{i%S}"   # C += A * S, S a scalar operand
+    - "fma c{(2*i+1)%C} a1 s{i%S}"
+    - "sload t{i%T} {8*i}"         # a scalar loaded, OFFSET bytes in
+    - {op: "vload v{i%2}", every: 7}   # only where i % 7 == 6
+```
+
+The roles: `fma C A S` (RVV vfmacc.vf, NEON/SVE fmla by element; x86 has no
+scalar form, S is a vector there), `vfma C A B`, `vload V`, `sload S OFFSET`,
+`iadd G IMM`. Register names give their class: `c` accumulators, `a b`
+vector sources, `v` vector load targets, `s t` scalar operands, `g` general
+registers; each name is a register of its own, allocated through asmgen. An
+experiment needing more registers than the ISA has is reported. `{...}` is
+an expression of `i` and of `C S T`, the accumulators and scalar operands
+there is room for (16, 8, 4 with 32 vector registers; 8, 4, 2 with 16).
+
+Each loop runs n and 2n iterations; the difference per iteration counts, the
+call's cost gone. The building, running and counting options are
+ukropt-sweep's (`--cpu`, `--runs`, `--use-prologue`, `--remote`,
+`--perf-lib`), shared through `ukropt/harness.py`.

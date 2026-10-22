@@ -1,0 +1,73 @@
+# ukropt-pairs experiments: the instruction mixes of GEMM microkernels, one
+# loop iteration = one k step, without any dependence between instructions.
+# A kernel's measured cycles per k step against its mix's: the machine's
+# limit for the mix (equal), or what the schedule costs (more).
+#
+#   ukropt-pairs rvv --experiments examples/pairs-gemm-mixes.yaml ...
+#
+# Shapes as ukrgen names them: 2x14 = 2 vectors of A (2 vector loads), 14
+# scalars of B (14 scalar loads), 28 FMAs per k step.
+
+mix-2vx14:
+  about: "2v x 14: 28 FMAs, 14 scalar loads, 2 vector loads, A sources alternating"
+  repeat: 14
+  body:
+    - "fma c{(2*i)%C} a0 s{i%S}"
+    - "fma c{(2*i+1)%C} a1 s{i%S}"
+    - "sload t{i%T} {8*i}"
+    - {op: "vload v{i%2}", every: 7}
+
+mix-2vx14-1src:
+  about: "as mix-2vx14, every FMA from one vector source: the pairing question"
+  repeat: 14
+  body:
+    - "fma c{(2*i)%C} a0 s{i%S}"
+    - "fma c{(2*i+1)%C} a0 s{i%S}"
+    - "sload t{i%T} {8*i}"
+    - {op: "vload v{i%2}", every: 7}
+
+mix-2vx15:
+  about: "2v x 15: 30 FMAs, 15 scalar loads, 2 vector loads"
+  repeat: 15
+  body:
+    - "fma c{(2*i)%C} a0 s{i%S}"
+    - "fma c{(2*i+1)%C} a1 s{i%S}"
+    - "sload t{i%T} {8*i}"
+    - {op: "vload v{i%2}", every: 15}
+    - {op: "vload v1", every: 8}
+
+mix-1vx28:
+  about: "1v x 28: 28 FMAs from one vector source, 28 scalar loads, 1 vector load"
+  repeat: 28
+  body:
+    - "fma c{i%C} a0 s{i%S}"
+    - "sload t{i%T} {8*i}"
+    - {op: "vload v0", every: 28}
+
+mix-1vx16:
+  about: "1v x 16: 16 FMAs from one vector source, 16 scalar loads, 1 vector load"
+  repeat: 16
+  body:
+    - "fma c{i%C} a0 s{i%S}"
+    - "sload t{i%T} {8*i}"
+    - {op: "vload v0", every: 16}
+
+mix-1vx16-2src:
+  about: "as mix-1vx16 with two vector sources in turn (a 1v kernel can't, but the core may want it)"
+  repeat: 16
+  body:
+    - "fma c{i%C} a{i%2} s{i%S}"
+    - "sload t{i%T} {8*i}"
+    - {op: "vload v0", every: 16}
+
+fma-only-28:
+  about: "28 FMAs, sources alternating: the FMA bound alone, for comparison"
+  repeat: 28
+  body:
+    - "fma c{i%C} a{i%2} s{i%S}"
+
+fma-only-28-1src:
+  about: "28 FMAs from one vector source"
+  repeat: 28
+  body:
+    - "fma c{i%C} a0 s{i%S}"
