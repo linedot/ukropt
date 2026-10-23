@@ -15,6 +15,7 @@ dependencies = ["PyYAML"]
 [project.scripts]
 ukropt-sweep = "ukropt.sweep:main"
 ukropt-pairs = "ukropt.pairs:main"
+ukropt-fmaload = "ukropt.fmaload:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ukropt"]

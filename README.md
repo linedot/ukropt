@@ -162,3 +162,28 @@ Each loop runs n and 2n iterations; the difference per iteration counts, the
 call's cost gone. The building, running and counting options are
 ukropt-sweep's (`--cpu`, `--runs`, `--use-prologue`, `--remote`,
 `--perf-lib`), shared through `ukropt/harness.py`.
+
+## ukropt-fmaload - FMA throughput with loads among the FMAs
+
+FLOP per cycle at FMA-to-load ratios, by data type and FMA form: the
+measurement behind the FMA throughput table of our paper, built on
+ukropt-pairs.
+
+```
+ukropt-fmaload rvv --ratios 0,1,4,14,26 --dt FP64,FP32,FP16 --form vf,vv \
+    --cpu 8,9 --use-prologue k3_ai --remote host:/tmp \
+    --cc riscv64-linux-gnu-gcc --cflags "-O2 -march=rv64gcv -static"
+```
+
+A loop's body updates N accumulators (`--accumulators`, by default as many
+as the registers allow), each once per N FMAs, with a vector load after
+every R-th FMA - counted across the loop's edge too: the body is lcm(N, R)
+FMAs long, so the loads are exactly R FMAs apart everywhere. (The paper's
+tool counted within one body of N FMAs: with N = 26, ratio 14 put one load in
+it, as ratio 26 did - the two columns measured the same thing.) Ratio 0 is
+the baseline, FMAs only. The loads go round-robin into `--load-regs`
+registers no FMA reads, from a 4096-aligned buffer of the type's 1.0; FLOP
+per cycle uses the vector length the core reports at run time. Each timing
+runs at least `--min-fmas` FMAs, short bodies more iterations. On RVV, FP16
+adds `_zfh_zvfh` to `-march` and turns asmgen's `ZVFH` on; `--isa-param`
+sets a generator's parameters (RVV's `LMUL=2`) - in ukropt-pairs too.

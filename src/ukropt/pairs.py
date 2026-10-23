@@ -100,6 +100,19 @@ TEMPLATE = re.compile(r"\{([^{}]+)\}")
 REGNAME = re.compile(r"[a-z][0-9]+$")
 
 
+def isa_params(items: list[str]) -> dict:
+    """
+    --isa-param NAME=VALUE options as a dict
+    """
+    out = {}
+    for item in items or []:
+        name, eq, value = item.partition("=")
+        if not eq or not name:
+            sys.exit(f"--isa-param {item!r}: NAME=VALUE")
+        out[name] = value
+    return out
+
+
 def load_experiments(path: str | None) -> dict:
     """
     The experiments: built in, or from a YAML file (name: {about, body,
@@ -184,11 +197,18 @@ class isa_ops:
     """
     The roles on one ISA, written through its asmgen generator
     """
-    def __init__(self, isa: str, dt_name: str):
+    def __init__(self, isa: str, dt_name: str, params: dict | None = None):
         from asmgen.registers import asm_data_type
         from ukrgen.flow.isa_map import make_generator
         self.isa = isa
         self.gen = make_generator(isa)
+        # the generator's parameters (RVV's LMUL, ZVFH, ...) before anything
+        # asks it what it can do
+        known = list(self.gen.get_parameters() or [])
+        for name, value in (params or {}).items():
+            if name not in known:
+                sys.exit(f"{isa}: no parameter {name} (there are {', '.join(known) or 'none'})")
+            self.gen.set_parameter(name, value)
         self.dt = getattr(asm_data_type, dt_name)
         self.ebytes = {"FP64": 8, "FP32": 4, "FP16": 2, "BF16": 2}.get(dt_name, 8)
 
@@ -475,6 +495,8 @@ def main():
     p.add_argument("--list", action="store_true", help="list the experiments and stop")
     p.add_argument("--show-asm", action="store_true", help="print each experiment's loop")
     p.add_argument("--dt", default="FP64", help="the data type (asmgen's name): FP64, FP32, ...")
+    p.add_argument("--isa-param", action="append", default=[], metavar="NAME=VALUE",
+                   help="a generator parameter (RVV: LMUL=2, ZVFH=on), repeatable")
     p.add_argument("--loop-offset", default=None,
                    help="bytes past a 64-byte boundary the loops start at, several "
                         "comma-separated (0,4,8,12): each experiment once per offset - whether "
@@ -499,7 +521,7 @@ def main():
             print(f"{name:16} {e['about']}")
         return
 
-    ops = isa_ops(args.isa, args.dt)
+    ops = isa_ops(args.isa, args.dt, isa_params(args.isa_param))
     if args.vector_bytes:
         ops.room["VB"] = args.vector_bytes
     out = args.out or f"ukrpairs-{args.isa}"
