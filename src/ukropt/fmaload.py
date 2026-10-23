@@ -21,10 +21,40 @@ import re
 import sys
 
 from .harness import C_HEADER, C_MAIN_BEGIN, C_MAIN_END, add_common_args, build, load_prologue, run
-from .pairs import BUF_BYTES, DRIVER_MEASURE, isa_ops, isa_params, parse
+from .pairs import BUF_BYTES, isa_ops, isa_params, parse
 
 EBYTES = {"FP64": 8, "FP32": 4, "FP16": 2}
 MAX_BODY = 1024        # FMAs a loop's body may hold
+
+MEASURE = r"""
+typedef void (*fl_fn)(long, double*);
+static double buf[BUF_DOUBLES] __attribute__((aligned(4096)));
+static int by_value(const void *a, const void *b)
+{
+    double x = *(const double*)a, y = *(const double*)b;
+    return (x > y) - (x < y);
+}
+/* per iteration: the least and the median of reps timings of n iterations -
+   n large enough that the call's cost doesn't count, no difference of two
+   lengths (whose minima can come from different modes of the core) */
+static void measure(const char *name, fl_fn f, long n, int reps)
+{
+    IN_CHILD(name, {
+        double t[64];
+        if (reps > 64) reps = 64;
+        if (reps < 1) reps = 1;
+        f(n / 4 + 1, buf);
+        for (int r = 0; r < reps; ++r) {
+            double t0 = now(); TIC();
+            f(n, buf);
+            t[r] = TOC(t0);
+        }
+        qsort(t, reps, sizeof *t, by_value);
+        printf("pair %s %.4f\n", name, t[0] / n);
+        printf("median %s %.4f\n", name, t[reps / 2] / n);
+    });
+}
+"""
 
 FILL = r"""
 /* iterations for a body of fmas FMAs: n, or enough for min_fmas FMAs */
@@ -114,11 +144,14 @@ def main():
     p.add_argument("--load-regs", type=int, default=4,
                    help="registers the loads go to in turn - no FMA reads them")
     p.add_argument("--iterations", type=int, default=2000,
-                   help="loop iterations timed at least (and twice as many: the difference "
-                        "counts)")
+                   help="loop iterations a timing runs at least")
     p.add_argument("--min-fmas", type=int, default=1000000,
                    help="FMAs a timing runs at least: short bodies get more iterations")
-    p.add_argument("--measurements", type=int, default=10, help="timings each, the least kept")
+    p.add_argument("--measurements", type=int, default=10,
+                   help="timings each: the least counts, the median shows whether they agree")
+    p.add_argument("--spread", type=float, default=2.0,
+                   help="percent the median may exceed the least before a result is marked "
+                        "unsteady (~)")
     p.add_argument("--loop-offset", type=int, default=None,
                    help="the loops' heads this many bytes past a 64-byte boundary")
     p.add_argument("--show-asm", action="store_true", help="print each loop")
@@ -185,7 +218,7 @@ def main():
     calls = "".join(f'    fill({EBYTES[dt]});\n    measure("{name}", fl_{i}, iters(n, {fmas}), reps);\n'
                     for i, (name, dt, form, r, acc, fmas, loads) in enumerate(exps))
     driver = (C_HEADER + load_prologue(args.use_prologue) + simd_c + "\n" + externs
-              + f"#define BUF_DOUBLES {BUF_BYTES // 8}\n" + DRIVER_MEASURE + FILL + C_MAIN_BEGIN
+              + f"#define BUF_DOUBLES {BUF_BYTES // 8}\n" + MEASURE + FILL + C_MAIN_BEGIN
               + '    printf("# simd_bytes %zu\\n", (size_t)get_simd_size());\n'
               + "    fflush(stdout);\n"
               + "    long n = argc > 1 ? atol(argv[1]) : 2000;\n"
@@ -208,8 +241,17 @@ def main():
             break
     if not simd_bytes:
         sys.exit("the benchmark didn't report its vector length")
+    medians = {}
+    for cpu, text in outputs.items():
+        seen = {}
+        for line in text.splitlines():
+            w = line.split()
+            if 3 == len(w) and "median" == w[0]:
+                seen.setdefault(w[1], []).append(float(w[2]))
+        medians[cpu] = {k: sorted(v)[len(v) // 2] for k, v in seen.items()}
     cpus = list(values)
     per = "cycle" if "cycles" == unit else unit
+    unsteady = 0
     print(f"FLOP per {per}; vectors of {simd_bytes} bytes at run time; FMAs per load exact, "
           f"across the loop's edge too")
     head = [f"core {c}" if c is not None else per for c in cpus]
@@ -217,17 +259,25 @@ def main():
     base = {}
     for name, dt, form, r, acc, fmas, loads in exps:
         flop = fmas * 2 * simd_bytes // EBYTES[dt]
-        rates = []
+        rates, marks = [], []
         for c in cpus:
             cyc = values[c].get(name, float("nan"))
             rates.append(flop / cyc if cyc and cyc == cyc else float("nan"))
+            med = medians.get(c, {}).get(name)
+            shaky = bool(cyc and cyc == cyc and med and med > cyc * (1 + args.spread / 100))
+            marks.append("~" if shaky else " ")
+            unsteady += shaky
         if 0 == r:
             base[(dt, form)] = rates
         b = base.get((dt, form))
         share = (", ".join(f"{100 * x / y:5.1f}%" for x, y in zip(rates, b) if y == y and x == x)
                  if b and r else "")
-        cells = [f"{x:8.3f}" if x == x else f"{'crashed':>8}" for x in rates]
+        cells = [f"{x:8.3f}{m}" if x == x else f"{'crashed':>8} " for x, m in zip(rates, marks)]
         print(" | ".join([f"{dt:4} {form:4} {r:5d}", f"{acc:3d}", f"{fmas:4d}", *cells, share]))
+
+    if unsteady:
+        print(f"~ unsteady: the timings' median over {args.spread:g}% above their least - the "
+              f"core ran this loop at more than one speed; the least is its fastest")
 
 
 if __name__ == "__main__":
