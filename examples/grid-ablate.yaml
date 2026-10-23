@@ -1,0 +1,29 @@
+# ukropt-sweep grid: a kernel as is, and with a kind of instruction taken out
+# of its k loop - what each kind costs. The kernels compute nonsense: only
+# their cycles count. The hooks are ukrgen's examples/hooks/ablate.py (ukrgen
+# 0155 on): run the sweep from the ukrgen checkout, where that path is.
+#
+#   ukropt-sweep ukrconfig/rvv/fma_vf/dgemm.yaml --family vm --size 2x14 \
+#       --grid ../ukropt/examples/grid-ablate.yaml --cpu 2,6 --runs 5 ...
+#
+# The kernel is the family's, as its file configures it. To take apart
+# another, add its settings as keys of one value each, e.g.
+#
+#   max-imm-offset: [64]
+#   order: [mnk]
+#   unroll: [2]
+
+hooks:
+  # as is
+  - null
+  # no vector loads: the schedule as it was, the loads gone from it
+  - ["after schedule examples/hooks/ablate.py drop what=vload"]
+  # no vector loads, the rest scheduled anew without them
+  - ["before schedule examples/hooks/ablate.py drop what=vload"]
+  # no scalar loads
+  - ["after schedule examples/hooks/ablate.py drop what=sload"]
+  # no address arithmetic - walks, the loop's advance: pointers stay
+  - ["after emit examples/hooks/ablate.py drop_lines pattern=^add"]
+  # neither vector loads nor address arithmetic
+  - ["after schedule examples/hooks/ablate.py drop what=vload",
+     "after emit examples/hooks/ablate.py drop_lines pattern=^add"]

@@ -1,0 +1,47 @@
+# ukropt-pairs experiments: do two instructions issue together only from
+# one aligned 8 or 16 bytes? Each is 16 pairs of an FMA and another
+# instruction, both orders; run at several offsets of the loop's head:
+#
+#   ukropt-pairs rvv --experiments examples/pairs-fetch.yaml --loop-offset 0,4,8,12 \
+#       --cc riscv64-linux-gnu-gcc --cflags "-O2 -march=rv64gv -static" ...
+#
+# With -march=rv64gv every instruction is 4 bytes. The loop starts with its
+# counter (4 bytes), so at offset 0 every pair straddles an 8-byte boundary
+# and at 4 every pair sits within one; 0, 4, 8, 12 walk a 16-byte block.
+# With rv64gcv the counter is 2 bytes (c.addi): offsets 2, 6, 10, 14 then.
+# fma-fma is the control: no offset should change it.
+
+fma-fma:
+  about: "32 FMAs: the control"
+  repeat: 32
+  body: ["fma c{i%C} a{i%2} s{i%S}"]
+
+fma-sload:
+  about: "an FMA, then a scalar load"
+  repeat: 16
+  body: ["fma c{i%C} a{i%2} s{i%S}", "sload t{i%T} {8*(i%8)}"]
+
+sload-fma:
+  about: "a scalar load, then an FMA"
+  repeat: 16
+  body: ["sload t{i%T} {8*(i%8)}", "fma c{i%C} a{i%2} s{i%S}"]
+
+fma-vload:
+  about: "an FMA, then a vector load"
+  repeat: 16
+  body: ["fma c{i%C} a{i%2} s{i%S}", "vload v{i%2}"]
+
+vload-fma:
+  about: "a vector load, then an FMA"
+  repeat: 16
+  body: ["vload v{i%2}", "fma c{i%C} a{i%2} s{i%S}"]
+
+fma-iadd:
+  about: "an FMA, then an integer add"
+  repeat: 16
+  body: ["fma c{i%C} a{i%2} s{i%S}", "iadd g{i%2} 8"]
+
+iadd-fma:
+  about: "an integer add, then an FMA"
+  repeat: 16
+  body: ["iadd g{i%2} 8", "fma c{i%C} a{i%2} s{i%S}"]

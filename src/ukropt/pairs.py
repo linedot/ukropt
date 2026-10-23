@@ -289,7 +289,7 @@ class isa_ops:
         return self.gen.load(dregs=[f], areg=areg, dt=self.dt)
 
     def function(self, sym: str, body: list[list[str]], label: str,
-                 pointers: dict | None = None) -> tuple[str, str]:
+                 pointers: dict | None = None, loop_offset: int | None = None) -> tuple[str, str]:
         """
         The experiment as a function sym(long n, double *buf): its whole text
         and its loop alone
@@ -378,8 +378,29 @@ class isa_ops:
         end = g.isaendquirks(rt=rt, dt=self.dt)
         save, load, restore = fg.get_boilerplate(cc)
         text = (f"    .text\n    .p2align 4\n    .globl {sym}\n{sym}:\n"
-                + save + load + quirks + init + "    .p2align 4\n" + loop + end + restore + g.ret())
+                + save + load + quirks + init
+                + ("    .p2align 4\n" if loop_offset is None
+                   else "    .p2align 6\n" + padding(self.isa, loop_offset))
+                + loop + end + restore + g.ret())
         return text, loop
+
+
+def padding(isa: str, nbytes: int) -> str:
+    """
+    nbytes of nops, written as their encodings (the assembler can't compress
+    them): the loop's head that far past a 64-byte boundary
+    """
+    if not nbytes:
+        return ""
+    if isa in ("rvv", "rv64", "riscv64") or isa.startswith("rv"):
+        if nbytes % 2:
+            sys.exit(f"--loop-offset {nbytes}: RISC-V instructions are 2 or 4 bytes")
+        return "    .4byte 0x00000013\n" * (nbytes // 4) + "    .2byte 0x0001\n" * (nbytes % 4 // 2)
+    if isa in ("neon", "sve", "sme") or isa.startswith(("arm", "aarch64")):
+        if nbytes % 4:
+            sys.exit(f"--loop-offset {nbytes}: AArch64 instructions are 4 bytes")
+        return "    .4byte 0xd503201f\n" * (nbytes // 4)
+    return "    .byte 0x90\n" * nbytes      # x86
 
 
 DRIVER_MEASURE = r"""
@@ -454,6 +475,11 @@ def main():
     p.add_argument("--list", action="store_true", help="list the experiments and stop")
     p.add_argument("--show-asm", action="store_true", help="print each experiment's loop")
     p.add_argument("--dt", default="FP64", help="the data type (asmgen's name): FP64, FP32, ...")
+    p.add_argument("--loop-offset", default=None,
+                   help="bytes past a 64-byte boundary the loops start at, several "
+                        "comma-separated (0,4,8,12): each experiment once per offset - whether "
+                        "instructions sharing an aligned 8 or 16 bytes issue together. On "
+                        "RISC-V, -march without c keeps every instruction 4 bytes")
     p.add_argument("--vector-bytes", type=int, default=None,
                    help="a vector's bytes (VLEN/8) for experiments using VB, on RVV and SVE")
     p.add_argument("--iterations", type=int, default=2000,
@@ -481,15 +507,25 @@ def main():
     form = ("a scalar-operand form" if ops.fma_form else "vector FMAs (no scalar form: S a vector)")
     print(f"# {args.isa}: {ops.nvregs} vector registers, room C={ops.room['C']} S={ops.room['S']} "
           f"T={ops.room['T']}; fma as {form}", file=sys.stderr)
-    names, texts, facts = [], [], {}
-    for i, (name, e) in enumerate(experiments.items()):
+    names, texts, facts, abouts = [], [], {}, {}
+    offsets = [None] if args.loop_offset is None else \
+        [int(x) for x in str(args.loop_offset).split(",") if x.strip()]
+    march = re.search(r"-march=rv(?:32|64)([a-z]*)", args.cflags or "")
+    if args.isa.startswith("rv") and any(o is not None and o % 4 for o in offsets) \
+            and march and "c" not in march.group(1):
+        sys.exit(f"--loop-offset {args.loop_offset}: an offset of 2 mod 4 needs 2-byte nops, "
+                 f"the C extension - -march=rv64gcv, or offsets that are multiples of 4")
+    variants = [(f"{name}@{off}" if off is not None and len(offsets) > 1 else name, name, e, off)
+                for name, e in experiments.items() for off in offsets]
+    for i, (name, base, e, off) in enumerate(variants):
         body = instructions(e, ops.room)
-        text, loop = ops.function(f"pairs_{i}", body, name, pointer_offsets(e, ops.room, name))
+        text, loop = ops.function(f"pairs_{i}", body, base, pointer_offsets(e, ops.room, base), off)
         names.append(name)
         texts.append(text)
         facts[name] = {"instrs": len(body), "fmas": sum(w[0] in ("fma", "vfma") for w in body)}
         if args.show_asm:
             print(f"# {name}: {e['about']}\n{loop}")
+        abouts[name] = e["about"] + (f" (loop at 64 + {off})" if off is not None else "")
     asm = os.path.join(out, "pairs.S")
     with open(asm, "w") as f:
         f.write("\n".join(texts))
@@ -517,7 +553,7 @@ def main():
         cells = [f"{v:8.2f}" if v == v else f"{'crashed':>8}" for v in per]
         print(" | ".join([f"{name:{wide}}", *cells, f"{n_i:5d}",
                           f"{per_fma:7.2f}" if per_fma == per_fma else f"{'-':>7}",
-                          f"{ipc:5.2f}" if ipc == ipc else f"{'-':>5}", experiments[name]["about"]]))
+                          f"{ipc:5.2f}" if ipc == ipc else f"{'-':>5}", abouts[name]]))
 
 
 if __name__ == "__main__":

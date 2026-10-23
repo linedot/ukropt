@@ -83,6 +83,20 @@ reported (variant, offset, signal) and the others still run.
 The BLIS declarations the wrappers compile against come from ukrgen where it
 ships them, else from the copy in `src/ukropt/data/blis_stub.h`.
 
+### What each kind of instruction costs: ablation
+
+With ukrgen's hooks (its patch 0155: scripts run around the flow's stages),
+`hooks` is a grid key like any other. `examples/grid-ablate.yaml` builds a
+kernel as is and without its vector loads, its scalar loads, its address
+arithmetic, or several - ukrgen's `examples/hooks/ablate.py` taking them out
+of the k loop. The kernels compute nonsense; their cycles show what each kind
+costs. Run it from the ukrgen checkout, where the hooks' paths are:
+
+```
+ukropt-sweep ukrconfig/rvv/fma_vf/dgemm.yaml --family vm --size 2x14 \
+    --grid ../ukropt/examples/grid-ablate.yaml --cpu 2,6 --runs 5 ...
+```
+
 ## ukropt-pairs - how a core executes instruction mixes
 
 Microbenchmarks generated through asmgen: an experiment is written once, in
@@ -134,6 +148,15 @@ and `{VB}` is a vector's bytes - fixed on NEON and x86, `--vector-bytes` on
 RVV and SVE. `examples/pairs-memory.yaml` uses them: where scalar loads with
 large offsets cost, and whether streaming through A and B, or switching
 between them, costs what the mixes don't show.
+
+Where code lies can matter: `--loop-offset 0,4,8,12` builds each experiment
+once per offset, its loop's head that many bytes past a 64-byte boundary
+(padded with nops written as their encodings, run once). Two instructions
+that issue together only from one aligned 8 or 16 bytes show it;
+`examples/pairs-fetch.yaml` has pairs of an FMA and another instruction, in
+both orders. On RISC-V, `-march=rv64gv` keeps every instruction 4 bytes (the
+loop's counter would be a 2-byte `c.addi` with the C extension); offsets of 2
+mod 4 need the C extension's 2-byte nops.
 
 Each loop runs n and 2n iterations; the difference per iteration counts, the
 call's cost gone. The building, running and counting options are
