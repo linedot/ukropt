@@ -291,7 +291,8 @@ def main():
             sym = f"{r['symbol']}_a{o}"
             sources.append(os.path.join(args.out, f"kernel{r['i']}_a{o}.s"))
             with open(sources[-1], "w") as f:
-                f.write(f"\t.text\n\t.balign 64\n\t.space {o}\n" + r["asm"].replace(r["symbol"], sym))
+                pad = f"\t.space {o}\n" if o else ""
+                f.write(f"\t.text\n\t.balign 64\n{pad}" + r["asm"].replace(r["symbol"], sym))
             wrappers.append(r["wrapper"].replace(r["symbol"], sym))
             helpers.append(r["helpers"].replace(r["symbol"], sym))
             calls.append(f'    {{ pid_t p = fork(); if (0 == p) {{ OPEN_COUNTER(); '

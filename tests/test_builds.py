@@ -46,5 +46,43 @@ class test_builds(unittest.TestCase):
                                 for f in os.listdir(out)), f"{tool} {isa}: no binary in {os.listdir(out)}")
 
 
+
+def ukrgen_configs():
+    """
+    ukrgen's ukrconfig directory, beside its source - None where it isn't
+    """
+    try:
+        import ukrgen
+    except ImportError:
+        return None
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(ukrgen.__file__))))
+    path = os.path.join(root, "ukrconfig")
+    return path if os.path.isdir(path) else None
+
+
+class test_sweep_builds(unittest.TestCase):
+    """
+    ukropt-sweep builds a few variants: its C driver compiles (asmgen's and
+    ukrgen's helpers in it once each) and its kernels assemble without
+    warnings
+    """
+    def test_rvv_vm(self):
+        cc, cflags = TARGETS["rvv"]
+        configs = ukrgen_configs()
+        if not shutil.which(cc) or configs is None:
+            self.skipTest("no RISC-V compiler or no ukrgen checkout")
+        with tempfile.TemporaryDirectory() as out:
+            r = subprocess.run([sys.executable, "-m", "ukropt.sweep",
+                                os.path.join(configs, "rvv", "fma_vf", "dgemm.yaml"),
+                                "--family", "vm", "--size", "2x14", "--sample", "2",
+                                "--grid", os.path.join(EXAMPLES, "grid-k1-vm.yaml"),
+                                "--build-only", "--out", out, "--cc", cc, f"--cflags={cflags}"],
+                               capture_output=True, text=True, timeout=1800)
+            self.assertEqual(0, r.returncode, r.stderr[-2000:] or r.stdout[-2000:])
+            self.assertNotIn("static static", r.stderr)
+            self.assertNotIn("Warning", r.stderr, r.stderr[-1500:])
+
+
 if __name__ == "__main__":
     unittest.main()
+
