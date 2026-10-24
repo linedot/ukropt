@@ -213,7 +213,8 @@ def main():
     asm = os.path.join(out, "fmaload.S")
     with open(asm, "w") as f:
         f.write("\n".join(texts))
-    simd_c = simd_c.replace("inline size_t get_simd_size", "static inline size_t get_simd_size")
+    # static, where the generator's helper isn't yet (asmgen before 0.6's phase 4)
+    simd_c = re.sub(r"(?<!static )inline size_t get_simd_size", "static inline size_t get_simd_size", simd_c)
     externs = "".join(f"extern void fl_{i}(long, double*);\n" for i in range(len(exps)))
     calls = "".join(f'    fill({EBYTES[dt]});\n    measure("{name}", fl_{i}, iters(n, {fmas}), reps);\n'
                     for i, (name, dt, form, r, acc, fmas, loads) in enumerate(exps))
