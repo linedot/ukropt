@@ -43,6 +43,7 @@ import sys
 
 import yaml
 
+from ukrgen.emitters import asmops
 from .harness import (C_HEADER, C_MAIN_BEGIN, C_MAIN_END, add_common_args, build,
                       load_prologue, run)
 
@@ -384,23 +385,23 @@ class isa_ops:
         init = ""
         for name, (tag, idx) in regs.items():
             if name[0] == "c":
-                init += g.zero_vreg(vreg=g.vreg(idx), dt=self.dt)
+                init += asmops.zero(g, reg=g.vreg(idx), dt=self.dt)
             elif name[0] in "abv":
                 init += self.vload(g.vreg(idx), buf)
             elif name[0] in "st":
                 init += self.sload(idx, buf, 0)
             elif name[0] == "g":
-                init += g.mov_greg_imm(reg=g.greg(idx), imm=0)
+                init += asmops.set_imm(g, reg=g.greg(idx), imm=0)
             elif name[0] == "p":
                 # buffer + offset: a multiple of 64 KB as one immediate (one
                 # instruction everywhere, AArch64's mov included), the rest added
                 off = pointers.get(name, 0)
                 big = off & ~0xFFFF
                 if big:
-                    init += (g.mov_greg_imm(reg=g.greg(idx), imm=big)
-                             + g.add_greg_greg(dst=g.greg(idx), reg1=g.greg(idx), reg2=buf))
+                    init += (asmops.set_imm(g, reg=g.greg(idx), imm=big)
+                             + asmops.add(g, dst=g.greg(idx), reg1=g.greg(idx), reg2=buf))
                 else:
-                    init += g.mov_greg(src=buf, dst=g.greg(idx))
+                    init += asmops.mov(g, src=buf, dst=g.greg(idx))
                 init += self.add_imm(g.greg(idx), off - big)
         lbl = f"{sym}_loop"
         loop = g.loopbegin(reg=n, label=lbl) + loop + g.loopend(reg=n, label=lbl)
