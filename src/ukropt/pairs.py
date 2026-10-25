@@ -95,7 +95,6 @@ BUILTIN = {
 
 KINDS = {"fma": (3,), "vfma": (3,), "vload": (1, 2), "sload": (2, 3), "iadd": (2,)}
 BUF_BYTES = 2 << 20
-FIXED_VB = {"neon": 16, "avx256": 32, "avx2": 32, "avx512": 64}
 TEMPLATE = re.compile(r"\{([^{}]+)\}")
 REGNAME = re.compile(r"[a-z][0-9]+$")
 
@@ -218,16 +217,10 @@ class isa_ops:
         self.scalar_tag = "vreg" if "vreg" in self.gen.get_reg_tracker().pool("freg") else "freg"
         big = self.nvregs >= 32
         self.room = {"C": 16 if big else 8, "S": 8 if big else 4, "T": 4 if big else 2}
-        if isa in FIXED_VB:
-            self.room["VB"] = FIXED_VB[isa]
+        if not self.gen.is_vla:
+            self.room["VB"] = self.gen.simd_size
         self.mask = self.gen.mreg(0) if hasattr(self.gen, "mreg") and "sve" in isa else None
         self.fma_form = self._find_fma_form()
-
-    def _try(self, call):
-        try:
-            return call()
-        except Exception:  # pylint: disable=broad-except
-            return None
 
     def _find_fma_form(self) -> dict | None:
         """
@@ -245,8 +238,7 @@ class isa_ops:
                   {"operand_modifiers": {"bdreg": {om.BLOCKLANE}}, "bdreg_lane": 0,
                    "bdreg_blocksize": 16 // self.ebytes}]
         for form in forms:
-            if self._try(lambda f=form: g.fma(adreg=g.vreg(1), bdreg=s, cdreg=g.vreg(3),
-                                               a_dt=d, b_dt=d, c_dt=d, **f)):
+            if g.fma.fits(adreg=g.vreg(1), bdreg=s, cdreg=g.vreg(3), a_dt=d, b_dt=d, c_dt=d, **form):
                 return form
         return None
 
@@ -256,12 +248,11 @@ class isa_ops:
 
     def fma_vv(self, c, a, b) -> str:
         g, d = self.gen, self.dt
-        out = self._try(lambda: g.fma(adreg=a, bdreg=b, cdreg=c, a_dt=d, b_dt=d, c_dt=d))
-        if out is None and self.mask is not None:
-            out = g.fma(adreg=a, bdreg=b, cdreg=c, a_dt=d, b_dt=d, c_dt=d, **self._masked())
-        if out is None:
-            sys.exit(f"{self.isa}: no vector FMA through asmgen")
-        return out
+        call = dict(adreg=a, bdreg=b, cdreg=c, a_dt=d, b_dt=d, c_dt=d)
+        for extra in ({}, self._masked() if self.mask is not None else None):
+            if extra is not None and g.fma.fits(**call, **extra):
+                return g.fma(**call, **extra)
+        sys.exit(f"{self.isa}: no vector FMA through asmgen")
 
     def fma_s(self, c, a, s) -> str:
         if self.fma_form is None:
@@ -272,27 +263,47 @@ class isa_ops:
     def vload(self, v, areg) -> str:
         from asmgen.asmblocks.op.opmem import opmem_modifier
         g = self.gen
-        out = self._try(lambda: g.load(dregs=[v], areg=areg, dt=self.dt))
-        if out is None and self.mask is not None:
-            out = g.load(dregs=[v], areg=areg, dt=self.dt, modifiers={opmem_modifier.MASK},
-                         amreg=self.mask)
-        if out is None:
-            sys.exit(f"{self.isa}: no vector load through asmgen")
-        return out
+        call = dict(dregs=[v], areg=areg, dt=self.dt)
+        masked = dict(modifiers={opmem_modifier.MASK}, amreg=self.mask) if self.mask is not None else None
+        for extra in ({}, masked):
+            if extra is not None and g.load.fits(**call, **extra):
+                return g.load(**call, **extra)
+        sys.exit(f"{self.isa}: no vector load through asmgen")
+
+    def _largest_immediate(self, positive: bool) -> int:
+        """
+        The largest immediate (in magnitude) the ISA's add holds, of a sign
+        """
+        from asmgen.registers import asm_data_type as adt
+        if not hasattr(self, "_immediates"):
+            self._immediates = {}
+        if positive not in self._immediates:
+            reg = self.gen.greg(0)
+            sign = 1 if positive else -1
+            for size in (2**31 - 1, 2**24 - 1, 4095, 2047, 1023, 255, 127, 63, 31, 15, 1):
+                if self.gen.add.fits(adreg=reg, bimm=sign * size, cdreg=reg, a_dt=adt.UINT64,
+                                     c_dt=adt.UINT64):
+                    self._immediates[positive] = sign * size
+                    break
+            else:
+                sys.exit(f"{self.isa}: no add of an immediate through asmgen")
+        return self._immediates[positive]
 
     def add_imm(self, reg, imm: int) -> str:
         """
-        reg += imm in steps every ISA encodes (RISC-V's addi: -2048..2047)
+        reg += imm: one add where the ISA's add holds the immediate (asked of
+        it: its constraints), else in steps of the largest one it holds
         """
+        from asmgen.registers import asm_data_type as adt
+        def call(value):
+            return dict(adreg=reg, bimm=value, cdreg=reg, a_dt=adt.UINT64, c_dt=adt.UINT64)
         out = ""
-        while imm > 2047:
-            out += self.gen.add_greg_imm(reg=reg, imm=2047)
-            imm -= 2047
-        while imm < -2048:
-            out += self.gen.add_greg_imm(reg=reg, imm=-2048)
-            imm += 2048
+        while imm and not self.gen.add.fits(**call(imm)):
+            step = self._largest_immediate(imm > 0)
+            out += self.gen.add(**call(step))
+            imm -= step
         if imm:
-            out += self.gen.add_greg_imm(reg=reg, imm=imm)
+            out += self.gen.add(**call(imm))
         return out
 
     def sload(self, idx, areg, offset) -> str:
@@ -335,11 +346,10 @@ class isa_ops:
                 if tag is None:
                     sys.exit(f"{label}: {name!r}: the classes are c a b v (vector), s t (scalar), "
                              f"g (general), p (pointers)")
-                try:
-                    idx = rt.reserve_any_reg(tag)
-                except Exception:  # pylint: disable=broad-except
+                if not rt.available(tag):
                     sys.exit(f"{label}: needs more {tag} registers than {self.isa} has free "
                              f"(at {name}, after {len(regs)} names)")
+                idx = rt.reserve_any_reg(tag)
                 regs[name] = (tag, idx)
             tag, idx = regs[name]
             if "greg" == tag:

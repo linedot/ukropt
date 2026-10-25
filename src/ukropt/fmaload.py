@@ -81,15 +81,7 @@ def free_vregs(ops) -> int:
     """
     The vector registers an experiment can have on this ISA
     """
-    rt = ops.gen.get_reg_tracker()
-    n = 0
-    while n < 1024:
-        try:
-            rt.reserve_any_reg("vreg")
-        except Exception:  # pylint: disable=broad-except
-            break
-        n += 1
-    return n
+    return ops.gen.get_reg_tracker().available("vreg")
 
 
 def body_for(form: str, n_acc: int, ratio: int, load_regs: int) -> tuple[list, int, int]:
@@ -110,14 +102,21 @@ def body_for(form: str, n_acc: int, ratio: int, load_regs: int) -> tuple[list, i
     return out, length, loads
 
 
-def fp16_march(cflags: str) -> str:
+def fp16_march(cflags: str, isa: str, cc: str) -> str:
     """
-    RISC-V's FP16: zfh (scalars) and zvfh (vectors) added to -march where
-    missing
+    RISC-V's FP16: the extensions the generator's -march has with its FP16
+    feature (asmgen's compiler_flags: zfh and zvfh on RVV) added to -march
+    where missing
     """
+    from ukrgen.flow.isa_map import make_generator
+    gen = make_generator(isa)
+    gen.set_features(["ZVFH"] if "ZVFH" in gen.FEATURES else [])
+    wanted = [f for f in gen.compiler_flags(cc) if f.startswith("-march=")]
+    extensions = wanted[0].split("_")[1:] if wanted else []
+
     def add(m):
         march = m.group(0)
-        for ext in ("zfh", "zvfh"):
+        for ext in extensions:
             if not re.search(rf"_{ext}(?![a-z])", march):
                 march += f"_{ext}"
         return march
@@ -165,7 +164,7 @@ def main():
             or any(f not in ("vf", "vv") for f in forms):
         sys.exit("--ratios are 0 or more, --dt FP64/FP32/FP16, --form vf/vv")
     if "FP16" in dts and args.isa.startswith("rv"):
-        flags = fp16_march(args.cflags)
+        flags = fp16_march(args.cflags, args.isa, args.cc)
         if flags != args.cflags:
             print(f"# FP16: --cflags {flags!r}", file=sys.stderr)
             args.cflags = flags
