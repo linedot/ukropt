@@ -212,11 +212,10 @@ class isa_ops:
         self.dt = getattr(asm_data_type, dt_name)
         self.ebytes = {"FP64": 8, "FP32": 4, "FP16": 2, "BF16": 2}.get(dt_name, 8)
 
-        def value(attr):
-            v = getattr(self.gen, attr)
-            return v() if callable(v) else v
-        self.nvregs = value("max_vregs")
-        self.scalar_tag = "vreg" if value("are_fregs_in_vregs") else "freg"
+        self.nvregs = self.gen.max_vregs()
+        # scalars in the vector file where FP registers are vector registers
+        # (the tracker's pools: SVE, NEON, x86), in their own where not (RVV)
+        self.scalar_tag = "vreg" if "vreg" in self.gen.get_reg_tracker().pool("freg") else "freg"
         big = self.nvregs >= 32
         self.room = {"C": 16 if big else 8, "S": 8 if big else 4, "T": 4 if big else 2}
         if isa in FIXED_VB:
