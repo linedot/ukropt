@@ -283,6 +283,7 @@ def main():
     ctype = "double" if "FP64" == dtype else "float"
     # a file a kernel: their local labels are alike
     offsets = [int(o) for o in args.align.split(",") if o.strip()]
+    gen = make_generator(cfg.isa)
     sources, calls, wrappers, helpers = [], [], [], []
     for r in built:
         for o in offsets:
@@ -291,8 +292,8 @@ def main():
             sym = f"{r['symbol']}_a{o}"
             sources.append(os.path.join(args.out, f"kernel{r['i']}_a{o}.s"))
             with open(sources[-1], "w") as f:
-                pad = f"\t.space {o}\n" if o else ""
-                f.write(f"\t.text\n\t.balign 64\n{pad}" + r["asm"].replace(r["symbol"], sym))
+                # nops, not .space's zeros (asmgen's align)
+                f.write(gen.asmwrap(".text") + gen.align(64, o) + r["asm"].replace(r["symbol"], sym))
             wrappers.append(r["wrapper"].replace(r["symbol"], sym))
             helpers.append(r["helpers"].replace(r["symbol"], sym))
             calls.append(f'    {{ pid_t p = fork(); if (0 == p) {{ OPEN_COUNTER(); '

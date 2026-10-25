@@ -24,7 +24,11 @@ CASES = [
     ("pairs_rvv_memory", "pairs", "rvv", ["--experiments", os.path.join(EXAMPLES, "pairs-memory.yaml"),
                                           "--vector-bytes", "32"]),
     ("pairs_rvv_fetch", "pairs", "rvv", ["--experiments", os.path.join(EXAMPLES, "pairs-fetch.yaml"),
-                                         "--loop-offset", "0,4"]),
+                                         "--loop-offset", "0,4,6"]),
+    # the loop's head past a 64-byte boundary by nops - AArch64's 4 bytes,
+    # RISC-V's c.nop for 2 mod 4 (asmgen's align)
+    ("pairs_neon_fetch", "pairs", "neon", ["--experiments", os.path.join(EXAMPLES, "pairs-fetch.yaml"),
+                                           "--loop-offset", "0,8"]),
     ("fmaload_rvv", "fmaload", "rvv", ["--dt", "FP64,FP32,FP16", "--form", "vf,vv"]),
     *[(f"fmaload_{isa}", "fmaload", isa, ["--dt", "FP64,FP32", "--form", "vf,vv"])
       for isa in ("neon", "sve", "avx256")],

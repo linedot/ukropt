@@ -397,30 +397,12 @@ class isa_ops:
         loop = g.loopbegin(reg=n, label=lbl) + loop + g.loopend(reg=n, label=lbl)
         end = g.isaendquirks(rt=rt, dt=self.dt)
         save, load, restore = fg.get_boilerplate(cc)
-        text = (f"    .text\n    .p2align 4\n    .globl {sym}\n{sym}:\n"
-                + save + load + quirks + init
-                + ("    .p2align 4\n" if loop_offset is None
-                   else "    .p2align 6\n" + padding(self.isa, loop_offset))
-                + loop + end + restore + g.ret())
+        # the loop's head on a 16-byte boundary, or loop_offset bytes past a
+        # 64-byte one (nops: asmgen's align)
+        head = g.align(16) if loop_offset is None else g.align(64, loop_offset)
+        text = fg.function(sym, save + load + quirks + init + head + loop + end + restore + g.ret(),
+                           align=16)
         return text, loop
-
-
-def padding(isa: str, nbytes: int) -> str:
-    """
-    nbytes of nops, written as their encodings (the assembler can't compress
-    them): the loop's head that far past a 64-byte boundary
-    """
-    if not nbytes:
-        return ""
-    if isa in ("rvv", "rv64", "riscv64") or isa.startswith("rv"):
-        if nbytes % 2:
-            sys.exit(f"--loop-offset {nbytes}: RISC-V instructions are 2 or 4 bytes")
-        return "    .4byte 0x00000013\n" * (nbytes // 4) + "    .2byte 0x0001\n" * (nbytes % 4 // 2)
-    if isa in ("neon", "sve", "sme") or isa.startswith(("arm", "aarch64")):
-        if nbytes % 4:
-            sys.exit(f"--loop-offset {nbytes}: AArch64 instructions are 4 bytes")
-        return "    .4byte 0xd503201f\n" * (nbytes // 4)
-    return "    .byte 0x90\n" * nbytes      # x86
 
 
 DRIVER_MEASURE = r"""
@@ -550,7 +532,7 @@ def main():
         abouts[name] = e["about"] + (f" (loop at 64 + {off})" if off is not None else "")
     asm = os.path.join(out, "pairs.S")
     with open(asm, "w") as f:
-        f.write("\n".join(texts))
+        f.write("\n".join(texts) + ops.gen.asmfile_annotations())
     exe = build(args, out, driver(load_prologue(args.use_prologue), names), [asm], "ukrpairs_bench")
     argv = [str(args.iterations), str(args.measurements)]
     if args.build_only:
