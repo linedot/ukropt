@@ -35,6 +35,8 @@ n times; the driver times n and 2n iterations and keeps the difference -
 the call's cost gone - per iteration, the least of --measurements timings.
 """
 
+import operator
+import ast
 import argparse
 import fnmatch
 import os
@@ -133,12 +135,53 @@ def load_experiments(path: str | None) -> dict:
     return out
 
 
+_OPERATORS = {
+    ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+    ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod,
+    ast.Pow: operator.pow, ast.USub: operator.neg, ast.UAdd: operator.pos, ast.Not: operator.not_,
+    ast.Eq: operator.eq, ast.NotEq: operator.ne, ast.Lt: operator.lt, ast.LtE: operator.le,
+    ast.Gt: operator.gt, ast.GtE: operator.ge,
+}
+
+
+def _expression(node, env: dict):
+    """
+    An experiment's expression, evaluated: numbers, names from env,
+    arithmetic, comparisons, and, or, not, a if c else b - nothing else (no
+    eval: it isn't a sandbox)
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float, bool)):
+        return node.value
+    if isinstance(node, ast.Name):
+        if node.id not in env:
+            raise NameError(f"name '{node.id}' is not defined")
+        return env[node.id]
+    if isinstance(node, ast.BinOp) and type(node.op) in _OPERATORS:
+        return _OPERATORS[type(node.op)](_expression(node.left, env), _expression(node.right, env))
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _OPERATORS:
+        return _OPERATORS[type(node.op)](_expression(node.operand, env))
+    if isinstance(node, ast.BoolOp):
+        values = (_expression(v, env) for v in node.values)
+        return all(values) if isinstance(node.op, ast.And) else any(values)
+    if isinstance(node, ast.Compare) and all(type(o) in _OPERATORS for o in node.ops):
+        left = _expression(node.left, env)
+        for op, right_node in zip(node.ops, node.comparators):
+            right = _expression(right_node, env)
+            if not _OPERATORS[type(op)](left, right):
+                return False
+            left = right
+        return True
+    if isinstance(node, ast.IfExp):
+        return _expression(node.body if _expression(node.test, env) else node.orelse, env)
+    raise ValueError(f"not in an experiment's expressions: {ast.unparse(node)}")
+
+
 def evaluate(expr: str, env: dict):
     """
     An expression in an experiment, of i, C, S, T and VB
     """
     try:
-        return eval(expr, {"__builtins__": {}}, env)
+        return _expression(ast.parse(expr, mode="eval").body, env)
     except NameError as err:
         if "VB" in str(err):
             sys.exit(f"{expr!r} needs a vector's bytes: --vector-bytes (VLEN/8 - 32 on the K1, 128 "
@@ -197,6 +240,9 @@ class isa_ops:
     """
     The roles on one ISA, written through its asmgen generator
     """
+    #: the largest immediates add holds, by sign - found on first use
+    _immediates: dict | None = None
+
     def __init__(self, isa: str, dt_name: str, params: dict | None = None):
         from asmgen.registers import asm_data_type
         from ukrgen.flow.isa_map import make_generator
@@ -209,7 +255,7 @@ class isa_ops:
             if name not in known:
                 sys.exit(f"{isa}: no parameter {name} (there are {', '.join(known) or 'none'})")
             self.gen.set_parameter(name, value)
-        self.dt = getattr(asm_data_type, dt_name)
+        self.dt = asm_data_type[dt_name]
         self.ebytes = {"FP64": 8, "FP32": 4, "FP16": 2, "BF16": 2}.get(dt_name, 8)
 
         self.nvregs = self.gen.max_vregs()
@@ -220,7 +266,8 @@ class isa_ops:
         self.room = {"C": 16 if big else 8, "S": 8 if big else 4, "T": 4 if big else 2}
         if not self.gen.is_vla:
             self.room["VB"] = self.gen.simd_size
-        self.mask = self.gen.mreg(0) if hasattr(self.gen, "mreg") and "sve" in isa else None
+        # the predicate the ISA's setup keeps all-true (SVE's, SME's p0), if any
+        self.mask = self.gen.isa_setup().all_true_predicate(rt=None, dt=self.dt)
         self.fma_form = self._find_fma_form()
 
     def _find_fma_form(self) -> dict | None:
@@ -276,7 +323,7 @@ class isa_ops:
         The largest immediate (in magnitude) the ISA's add holds, of a sign
         """
         from asmgen.registers import asm_data_type as adt
-        if not hasattr(self, "_immediates"):
+        if self._immediates is None:
             self._immediates = {}
         if positive not in self._immediates:
             reg = self.gen.greg(0)
