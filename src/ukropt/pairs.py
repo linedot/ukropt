@@ -244,8 +244,8 @@ class isa_ops:
         return None
 
     def _masked(self) -> dict:
-        from asmgen.asmblocks.op.opd3 import opd3_modifier
-        return {"modifiers": {opd3_modifier.MASK}, "amreg": self.mask} if self.mask is not None else {}
+        from asmgen.asmblocks.op.optransform import optransform_modifier
+        return {"modifiers": {optransform_modifier.MASK}, "amreg": self.mask} if self.mask is not None else {}
 
     def fma_vv(self, c, a, b) -> str:
         g, d = self.gen, self.dt
