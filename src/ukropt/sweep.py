@@ -256,7 +256,8 @@ def build_variant(job):
 
 
 def main():
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(description=__doc__, epilog=MODES_HELP,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("config", help="a family file (ukrconfig/<isa>/<config>/dgemm.yaml, dpackm.yaml)")
     p.add_argument("--family", required=True)
     p.add_argument("--size", default=None,
@@ -328,13 +329,13 @@ def main():
     args = p.parse_args()
 
     kind = args.kind or ("packm" if "packm" in os.path.basename(args.config) else "gemm")
+    mode = "blis" if args.blis else ("any" if args.any or "gemm" != kind else "gemm")
+    check_options(p, args, mode, kind)
     if args.blis:
         return blis_mode(args, kind)
     if not args.size:
         sys.exit("--size: MxN for gemm, a packm case's rows")
     anyk = args.any or "gemm" != kind
-    if (args.loop or args.levels) and not anyk:
-        sys.exit("--loop and --levels are any-kernel mode's (--any)")
     dtype = args.dt or dtype_of(args.config)
     cfg = configuration.from_files({(kind, dtype): args.config})
     base = next(f for f in cfg.families if f.name == args.family)
@@ -404,31 +405,7 @@ def main():
         f.write(driver)
     with open(os.path.join(args.out, "variants.yaml"), "w") as f:
         yaml.safe_dump({r["i"]: r["settings"] for r in built}, f, sort_keys=False)
-    exe = os.path.join(args.out, "bench")
-    if args.perf_lib:
-        # performance_counters (C++) behind three C functions
-        shim = os.path.join(args.out, "pc_shim.cpp")
-        with open(shim, "w") as f:
-            f.write('#include "performance_counters.hpp"\n'
-                    'static performance_counters* pc;\n'
-                    'extern "C" int pc_init(const char* e) { pc = new performance_counters('
-                    'std::vector<std::string>{e}, false); return 1; }\n'
-                    'extern "C" void pc_tic() { pc->tic(); }\n'
-                    'extern "C" unsigned long long pc_toc() { return pc->toc()[0]; }\n')
-        steps = [[args.cc, *args.cflags.split(), "-DUSE_PCLIB", f'-DPC_EVENT="{args.event}"', "-c",
-                  os.path.join(args.out, "driver.c"), "-o", os.path.join(args.out, "driver.o")],
-                 [args.cxx, *args.cflags.split(), "-std=c++17", f"-I{args.perf_lib}", "-o", exe,
-                  os.path.join(args.out, "driver.o"), shim,
-                  os.path.join(args.perf_lib, f"performance_counters_{args.perf_backend}.cpp"), *sources]
-                 + (["-lpapi"] if "papi" == args.perf_backend else [])]
-    else:
-        steps = [[args.cc, *args.cflags.split(), "-o", exe, os.path.join(args.out, "driver.c"), *sources]]
-    for step in steps:
-        r = subprocess.run(step, capture_output=True, text=True)
-        if r.returncode:
-            break
-    if r.returncode:
-        sys.exit(r.stderr[:2000])
+    exe = compile_bench(args, sources)
     ks = [k for k in ((args.levels or args.loop or args.k) if anyk else args.k).split(",") if k]
     if args.build_only:
         print(f"built {exe}: run '{exe} {' '.join(ks)}' on the target; variants in {args.out}/variants.yaml")
@@ -535,6 +512,116 @@ def main():
     print("best:\n" + yaml.safe_dump(settings[trusted[0]], sort_keys=False))
 
 
+def compile_bench(args, sources: list) -> str:
+    """
+    The benchmark from driver.c and the kernels' sources - with
+    performance_counters' counters where --perf-lib gives them - or the
+    compiler's complaint
+    """
+    exe = os.path.join(args.out, "bench")
+    if args.perf_lib:
+        # performance_counters (C++) behind three C functions
+        shim = os.path.join(args.out, "pc_shim.cpp")
+        with open(shim, "w") as f:
+            f.write('#include "performance_counters.hpp"\n'
+                    'static performance_counters* pc;\n'
+                    'extern "C" int pc_init(const char* e) { pc = new performance_counters('
+                    'std::vector<std::string>{e}, false); return 1; }\n'
+                    'extern "C" void pc_tic() { pc->tic(); }\n'
+                    'extern "C" unsigned long long pc_toc() { return pc->toc()[0]; }\n')
+        steps = [[args.cc, *args.cflags.split(), "-DUSE_PCLIB", f'-DPC_EVENT="{args.event}"', "-c",
+                  os.path.join(args.out, "driver.c"), "-o", os.path.join(args.out, "driver.o")],
+                 [args.cxx, *args.cflags.split(), "-std=c++17", f"-I{args.perf_lib}", "-o", exe,
+                  os.path.join(args.out, "driver.o"), shim,
+                  os.path.join(args.perf_lib, f"performance_counters_{args.perf_backend}.cpp"), *sources]
+                 + (["-lpapi"] if "papi" == args.perf_backend else [])]
+    else:
+        steps = [[args.cc, *args.cflags.split(), "-o", exe, os.path.join(args.out, "driver.c"), *sources]]
+    for step in steps:
+        r = subprocess.run(step, capture_output=True, text=True)
+        if r.returncode:
+            sys.exit(r.stderr[:2000])
+    return exe
+
+
+#: what each option is in each mode (gemm, any-kernel, BLIS-like): None where
+#: the mode doesn't use it - given there, the sweep stops and says why
+OPTIONS = {
+    "size": ("--size", {"gemm": "MxN", "any": "MxN (gemm), a packm case's rows",
+                        "blis": None}, "cdim is --blis's"),
+    "case": ("--case", {"gemm": None, "any": "the packm case (default the family's first)",
+                        "blis": "the case kinds kept: vec,trans"}, "a gemm family has no cases"),
+    "any": ("--any", {"gemm": "any-kernel mode instead", "any": "(a packm family's mode anyway)",
+                      "blis": None}, "--blis calls the family's dispatch, not a kernel"),
+    "k": ("--k", {"gemm": "the values of k", "any": None, "blis": None},
+          "--loop gives the counts (its default --k's)"),
+    "loop": ("--loop", {"gemm": None, "any": "loop counts, a line fitted (default --k's)",
+                        "blis": "numbers of columns (default --k's)"}, "gemm mode times --k's values"),
+    "levels": ("--levels", {"gemm": None, "any": "working sets NAME=BYTES, a rate each - not with --loop",
+                            "blis": None}, "any-kernel mode's (packm, or gemm with --any)"),
+    "align": ("--align", {"gemm": "offsets", "any": "offsets", "blis": None},
+              "--blis places each kernel once"),
+    "rank": ("--rank", {"gemm": "with several --cpu", "any": "with several --cpu, --loop", "blis": None},
+             "nothing's ranked: each variant reported"),
+    "max_residual": ("--max-residual", {"gemm": "the fit's", "any": "--loop's fit", "blis": None},
+                     "no line is fitted"),
+}
+
+MODES_HELP = """
+modes - the family file's kind (its name, or --kind) and two options choose one:
+  gemm        a gemm family (dgemm.yaml): each variant through its BLIS wrapper at
+              the values of --k, a line fitted - cycles a k step, a call's
+  any-kernel  a packm family (dpackm.yaml), or a gemm family with --any: each
+              variant through its own symbol, at the loop counts of --loop (a line
+              fitted) or at the working sets of --levels (a rate per level)
+  BLIS-like   a packm family with --blis: its dispatch called with BLIS's
+              arguments at the numbers of columns of --loop - the case fallen
+              into, the panel checked, the time
+
+options by mode - gemm | any-kernel | BLIS-like; where a mode has -, the option
+given stops the sweep, saying why:
+  --size          MxN | MxN (gemm), a packm case's rows | - (cdim is --blis's)
+  --case          - | the packm case (default the first) | the case kinds kept
+  --any           any-kernel mode instead | (packm: anyway) | -
+  --k             the values of k | - (--loop's default) | - (--loop's default)
+  --loop          - | loop counts, a line fitted | numbers of columns
+  --levels        - | working sets, a rate each; not with --loop | -
+  --align         offsets | offsets | - (one placement each)
+  --cpu           cores | cores | one core
+  --rank          with several cores | with several cores, --loop | -
+  --max-residual  the fit's | --loop's fit | -
+  --sample/--seed with --grid; --perf-backend/--event/--cxx with --perf-lib
+  every other option in every mode: --grid --dt --kind --cc --cflags --out
+  --build-only --remote --jobs --measurements --iterations --runs
+  --use-prologue --perf-lib
+the defaults from the file's name: its kind (dpackm.yaml packm, else gemm) and
+its type (sgemm.yaml, spackm.yaml FP32, else FP64), --dt and --kind over them
+"""
+
+
+def check_options(p, args, mode: str, kind: str):
+    """
+    Each option given (not at its default) used by the mode, and the ones
+    that go together together: else the sweep stops, saying why
+    """
+    given = lambda dest: getattr(args, dest) != p.get_default(dest)
+    for dest, (flag, by_mode, why) in OPTIONS.items():
+        if given(dest) and by_mode[mode] is None:
+            sys.exit(f"{flag}: not in {mode} mode - {why}")
+    if "any" == mode and "gemm" == kind and given("case"):
+        sys.exit("--case: a gemm family has no cases")
+    if given("levels") and given("loop"):
+        sys.exit("--levels or --loop: the counts for working sets, or the counts themselves")
+    if given("levels") and (given("rank") or given("max_residual")):
+        sys.exit("--rank, --max-residual: with --levels no line is fitted, nothing ranked")
+    if "blis" == mode and args.cpu is not None and "," in str(args.cpu):
+        sys.exit("--cpu: --blis measures on one core")
+    if not given("grid") and (given("sample") or given("seed")):
+        sys.exit("--sample, --seed: they choose among --grid's combinations")
+    if not given("perf_lib") and any(given(d) for d in ("perf_backend", "event", "cxx")):
+        sys.exit("--perf-backend, --event, --cxx: with --perf-lib")
+
+
 def blis_mode(args, kind: str):
     """
     BLIS-like packm mode (--blis): every variant's whole family and its
@@ -580,11 +667,7 @@ def blis_mode(args, kind: str):
         f.write(driver)
     with open(os.path.join(args.out, "variants.yaml"), "w") as f:
         yaml.safe_dump({r["i"]: r["settings"] for r in built}, f, sort_keys=False)
-    exe = os.path.join(args.out, "bench")
-    r = subprocess.run([args.cc, *args.cflags.split(), "-o", exe, os.path.join(args.out, "driver.c"), *sources],
-                       capture_output=True, text=True)
-    if r.returncode:
-        sys.exit(r.stderr[:2000])
+    exe = compile_bench(args, sources)
     if args.build_only:
         print(f"built {exe}: run '{exe} {' '.join(ns)}' on the target; variants in {args.out}/variants.yaml")
         return
@@ -594,11 +677,17 @@ def blis_mode(args, kind: str):
         r = subprocess.run(["scp", exe, f"{host}:{where}/ukrsweep_bench"], capture_output=True, text=True)
         if r.returncode:
             sys.exit(f"scp failed: {r.stderr}")
-        out = subprocess.run(["ssh", host, f"cd {where} && ./ukrsweep_bench {' '.join(ns)}"],
-                             capture_output=True, text=True, timeout=3600).stdout
-    else:
-        env = dict(os.environ, **({"UKRSWEEP_CPU": str(args.cpu).split(",")[0]} if args.cpu is not None else {}))
-        out = subprocess.run([exe, *ns], capture_output=True, text=True, timeout=3600, env=env).stdout
+    pin = f"UKRSWEEP_CPU={args.cpu} " if args.cpu is not None else ""
+    env = dict(os.environ, **({"UKRSWEEP_CPU": str(args.cpu)} if args.cpu is not None else {}))
+    outs = []
+    for _ in range(max(1, args.repeat)):
+        # each point the median of the runs' fastest (--runs)
+        if args.remote:
+            outs.append(subprocess.run(["ssh", host, f"cd {where} && {pin}./ukrsweep_bench {' '.join(ns)}"],
+                                       capture_output=True, text=True, timeout=3600).stdout)
+        else:
+            outs.append(subprocess.run([exe, *ns], capture_output=True, text=True, timeout=3600, env=env).stdout)
+    out = "\n".join(outs)
     for i, _, sig in sorted(set(re.findall(r"crashed (\d+) (\d+) (-?\d+)", out))):
         print(f"variant {i}: crashed (signal or status {sig})", file=sys.stderr)
     found = re.search(r"# unit (\w+)", out)
