@@ -136,6 +136,41 @@ class test_anykernel(unittest.TestCase):
                           "--size", "3", "--levels", "L1=16K", "--build-only", "--cc", cc, f"--cflags={cflags}")
 
 
+class test_toolchain(unittest.TestCase):
+    """
+    A config's kernels built by a compiler for another machine - an x86
+    compiler filling RVV's vsetvli %0 with %rcx - or a binary for another
+    machine run here: stopped before building, saying what to give
+    """
+    def last(self, *args):
+        configs = ukrgen_configs()
+        if configs is None:
+            self.skipTest("no ukrgen checkout")
+        r = subprocess.run([sys.executable, "-m", "ukropt.sweep",
+                            os.path.join(configs, "rvv", "fma_vf", "dpackm.yaml"), "--family", "pk",
+                            "--blis", "cdim=4,lda=1", "--loop", "8", "--out", "/nonexistent", *args],
+                           capture_output=True, text=True, timeout=600)
+        self.assertNotEqual(0, r.returncode)
+        return (r.stderr or r.stdout).strip().splitlines()[-1]
+
+    def test_wrong_compiler(self):
+        import platform
+        if "riscv64" == platform.machine() or not shutil.which("gcc"):
+            self.skipTest("needs a host compiler for another machine")
+        said = self.last("--cc", "gcc")
+        self.assertIn("is for rvv, a riscv64 ISA", said)
+        self.assertIn("--cc riscv64-linux-gnu-gcc", said)
+
+    def test_not_runnable_here(self):
+        import platform
+        cc, _ = TARGETS["rvv"]
+        if "riscv64" == platform.machine() or not shutil.which(cc):
+            self.skipTest("needs a RISC-V cross compiler on another machine")
+        said = self.last("--cc", cc)
+        self.assertIn("doesn't run on this", said)
+        self.assertIn("--runner", said)
+
+
 class test_blislike(unittest.TestCase):
     """
     ukropt-sweep's BLIS-like packm mode: a family called through ukrgen's

@@ -47,6 +47,7 @@ import argparse
 import copy
 import itertools
 import os
+import platform
 import random
 import re
 import shlex
@@ -344,6 +345,7 @@ def main():
     anyk = args.any or "gemm" != kind
     dtype = args.dt or dtype_of(args.config)
     cfg = configuration.from_files({(kind, dtype): args.config})
+    check_toolchain(args, cfg.isa)
     base = next(f for f in cfg.families if f.name == args.family)
     size = tuple(int(x) for x in args.size.lower().split("x"))
     if "gemm" == kind and 2 != len(size):
@@ -519,6 +521,41 @@ def main():
     print("best:\n" + yaml.safe_dump(settings[trusted[0]], sort_keys=False))
 
 
+#: the machine each ISA's kernels run on, as compilers name it (-dumpmachine)
+ISA_MACHINE = {"rvv": "riscv64", "neon": "aarch64", "sve": "aarch64", "sme": "aarch64", "avx": "x86_64"}
+#: a compiler and flags for each machine, and a way to run it here
+CROSS = {"riscv64": ("riscv64-linux-gnu-gcc", "-O2 -static -march=rv64gcv",
+                     "qemu-riscv64-static -cpu rv64,v=true,vlen=256,elen=64"),
+         "aarch64": ("aarch64-linux-gnu-gcc", "-O2 -static -march=armv9-a+sve2+sme", "qemu-aarch64-static -cpu max"),
+         "x86_64": ("gcc", "-O2 -march=native", None)}
+
+
+def check_toolchain(args, isa: str):
+    """
+    The compiler builds for the machine the config's kernels are for, and
+    the binary runs where it's run - else the sweep stops, saying what to
+    give (a cross compiler's driver.c gets the kernels' inline assembly - an
+    x86 compiler fills RVV's vsetvli %0 with %rcx)
+    """
+    machine = next((m for prefix, m in ISA_MACHINE.items() if isa.startswith(prefix)), None)
+    if machine is None:
+        return
+    try:
+        target = subprocess.run([args.cc, "-dumpmachine"], capture_output=True, text=True,
+                                timeout=60).stdout.strip()
+    except OSError:
+        sys.exit(f"--cc {args.cc}: no such compiler")
+    cc, cflags, runner = CROSS[machine]
+    if target and not target.startswith(machine):
+        sys.exit(f"{os.path.basename(args.config)} is for {isa}, a {machine} ISA; --cc {args.cc} compiles for "
+                 f"{target}: give --cc {cc} --cflags '{cflags}'")
+    host = platform.machine()
+    if machine != host and not (args.remote or args.runner or args.build_only):
+        sys.exit(f"a {machine} binary doesn't run on this {host}: --remote HOST:DIR measures it on the target"
+                 + (f", --runner '{runner}' checks it here (its times emulated)" if runner else "")
+                 + ", --build-only builds it")
+
+
 def compile_bench(args, sources: list) -> str:
     """
     The benchmark from driver.c and the kernels' sources - with
@@ -642,6 +679,7 @@ def blis_mode(args, kind: str):
     call = blislike.resolve(blislike.parse_call(args.blis), [int(n) for n in ns])
     dtype = args.dt or dtype_of(args.config)
     cfg = configuration.from_files({(kind, dtype): args.config})
+    check_toolchain(args, cfg.isa)
     grid = yaml.safe_load(open(args.grid)) if args.grid else {}
     variants = combinations(grid, args.sample, args.seed) if grid else [{}]
     # --case: the cases kept by name or kind (vec,trans) - the dispatch falls
