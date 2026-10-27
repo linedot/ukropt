@@ -14,6 +14,9 @@ settings are ranked. Cycles from Linux's perf_event_open, else wall-clock time -
       --grid grid.yaml [--sample 32] [--cc gcc] [--k 64,256] [--build-only]
       [--remote k1:/tmp --cc riscv64-linux-gnu-gcc --cflags "-O2 -march=rv64gcv -static"]
 
+the data type is the config's own - sgemm.yaml is FP32, dgemm.yaml FP64 -
+unless --dt names it, so a file named otherwise (gemm-fp32.yaml) can be swept
+
 grid.yaml - family keys or flow parameters to lists of values:
   sched-cycle-slots: ["2:vl|vs|vf,sl,i", "3:vf|vs|vf,vl|vs|vf,sl,sl,i;vf-sl"]
   buckets: [null, "vf:5", "vf:8"]
@@ -178,13 +181,23 @@ def combinations(grid: dict, sample: int | None, seed: int) -> list[dict]:
     return every
 
 
+CTYPE = {"FP64": "double", "FP32": "float"}
+
+
+def dtype_of(config: str) -> str:
+    """
+    The data type a gemm family file is for: its name's first letter, as
+    ukrgen's configs are named (sgemm, spackm - FP32, else FP64)
+    """
+    return "FP32" if os.path.basename(config).startswith("s") else "FP64"
+
+
 def build_variant(job):
     """
     One variant, in a worker process: the kernel's assembly, BLIS wrapper and
     vector-length helpers as text, or why it didn't build
     """
-    i, settings, config, family_name, m, n = job
-    dtype = "FP32" if os.path.basename(config).startswith("s") else "FP64"
+    i, settings, config, dtype, family_name, m, n = job
     cfg = configuration.from_files({("gemm", dtype): config})
     base = next(f for f in cfg.families if f.name == family_name)
     fam = copy.deepcopy(base)
@@ -209,7 +222,7 @@ def build_variant(job):
     if not ok:
         return {"i": i, "settings": settings, "error": skipped[0][2][:200]}
     k = ok[0]
-    ctype = "double" if "FP64" == dtype else "float"
+    ctype = CTYPE[dtype]
     return {"i": i, "settings": settings, "asm": asm_source(k), "wrapper": gemm_wrapper(k),
             "helpers": vl_helpers([k], make_generator(cfg.isa)), "symbol": k.symbol,
             "mr": c_expr(k.mr, ctype, k.vl_fn), "nr": c_expr(k.nr, ctype, k.vl_fn)}
@@ -261,15 +274,18 @@ def main():
     p.add_argument("--perf-backend", default="perf", help="perf, papi, m1 or simple")
     p.add_argument("--event", default="CYCLES", help="the counter (PAPI: PAPI_TOT_CYC)")
     p.add_argument("--cxx", default="g++")
+    p.add_argument("--dt", "--dtype", dest="dt", default=None, choices=sorted(CTYPE),
+                   help="the data type the kernel is for: FP64, FP32 (default: the family file's "
+                        "name - sgemm.yaml is FP32, dgemm.yaml FP64)")
     args = p.parse_args()
 
-    dtype = "FP32" if os.path.basename(args.config).startswith("s") else "FP64"
+    dtype = args.dt or dtype_of(args.config)
     cfg = configuration.from_files({("gemm", dtype): args.config})
     base = next(f for f in cfg.families if f.name == args.family)
     m, n = (int(x) for x in args.size.lower().split("x"))
     grid = yaml.safe_load(open(args.grid))
     variants = combinations(grid, args.sample, args.seed)
-    jobs = [(i, v, args.config, args.family, m, n) for i, v in enumerate(variants)]
+    jobs = [(i, v, args.config, dtype, args.family, m, n) for i, v in enumerate(variants)]
     from concurrent.futures import ProcessPoolExecutor
     with ProcessPoolExecutor(max_workers=args.jobs) as pool:
         results = list(pool.map(build_variant, jobs))
@@ -280,7 +296,7 @@ def main():
     if not built:
         sys.exit("no variant built")
     os.makedirs(args.out, exist_ok=True)
-    ctype = "double" if "FP64" == dtype else "float"
+    ctype = CTYPE[dtype]
     # a file a kernel: their local labels are alike
     offsets = [int(o) for o in args.align.split(",") if o.strip()]
     gen = make_generator(cfg.isa)
