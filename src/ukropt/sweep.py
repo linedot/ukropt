@@ -274,7 +274,8 @@ def main():
                    help="the family file's kind (default: its name - dpackm.yaml packm, else gemm)")
     p.add_argument("--case", default=None,
                    help="a packm family's case: vec, gather, trans (default: its first); with --blis, the "
-                        "case kinds kept, vec,trans - the dispatch falls into what's left")
+                        "cases kept by name or kind, vec,trans - the dispatch falls into what's left (a grid's "
+                        "dispatch: [trans, gather] orders them)")
     p.add_argument("--any", action="store_true",
                    help="any-kernel mode for gemm too (packm always): the kernel called through its own "
                         "symbol, its arguments from its layouts and sizes - no BLIS wrapper")

@@ -179,6 +179,21 @@ class test_blislike(unittest.TestCase):
             with self.subTest(call=call), self.assertRaises(SystemExit):
                 check_call(parse_call(call), ns)
 
+    def test_dispatch_swept(self):
+        # the dispatch's order a grid's: gather first, or the transpose first
+        if not (shutil.which("gcc") and has_avx2()):
+            self.skipTest("needs gcc and an AVX2 CPU")
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as grid:
+            grid.write("dispatch: [[gather, trans], [trans, gather]]\n")
+        try:
+            said = self.sweep(os.path.join("avx2", "fma_bc_blocks", "dpackm.yaml"), "--blis",
+                              "cdim=4,inca=1024,lda=1,ldp=4", "--grid", grid.name, "--loop", "64",
+                              "--cflags=-O2 -mavx2 -mfma")
+        finally:
+            os.unlink(grid.name)
+        self.assertRegex(said, r"variant 0 \{'dispatch': \['gather', 'trans'\]\}:\n +n +64 [^\n]*: gather4 ")
+        self.assertRegex(said, r"variant 1 \{'dispatch': \['trans', 'gather'\]\}:\n +n +64 [^\n]*: trans4 ")
+
     def test_builds_rvv(self):
         cc, cflags = TARGETS["rvv"]
         if not shutil.which(cc):

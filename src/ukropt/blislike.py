@@ -189,13 +189,22 @@ def build_blis_variant(job):
     base = next(f for f in cfg.families if f.name == family_name)
     fam = copy.deepcopy(base)
     name = f"{cfg.name}v{i}"
+    # the family's own choices (dispatch: the cases tried, in order) on it,
+    # the rest each case's flow parameters
+    flow = dict(settings)
+    if "dispatch" in flow:
+        fam.dispatch = flow.pop("dispatch")
+        unknown = [d for d in fam.dispatch or [] if d not in fam.case_kinds]
+        if unknown:
+            return {"i": i, "settings": settings, "error": f"dispatch names no case {unknown}"}
     cases = []
-    for kind, ms, params in fam.cases:
-        if keep and kind not in keep:
+    for case, ms, params in fam.cases:
+        # --case: kept by name or kind
+        if keep and case not in keep and fam.case_kinds.get(case, case) not in keep:
             continue
         params = dict(params)
-        apply_settings("packm", params, settings)
-        cases.append((kind, ms, params))
+        apply_settings("packm", params, flow)
+        cases.append((case, ms, params))
     fam.cases = cases
     try:
         built, skipped = build_packm(cfg.isa, name, fam)
@@ -206,7 +215,7 @@ def build_blis_variant(job):
     ch = {"FP64": "d", "FP32": "s"}[dtype]
     return {"i": i, "settings": settings, "name": name, "ch": ch,
             "asm": [(asm_symbol(k), asm_source(k)) for k in built],
-            "dispatch": instrument(packm_dispatch(name, dtype, built), built, name, ch),
+            "dispatch": instrument(packm_dispatch(name, dtype, built, fam.dispatch), built, name, ch),
             "helpers": vl_helpers(built, make_generator(cfg.isa)),
             # each case as its symbol ends: its kind and rows (vec8, trans4)
             "cases": [k.symbol.rsplit("_", 1)[1] for k in built],
