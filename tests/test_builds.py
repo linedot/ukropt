@@ -87,6 +87,54 @@ class test_sweep_builds(unittest.TestCase):
             self.assertNotIn("Warning", r.stderr, r.stderr[-1500:])
 
 
+
+def has_avx2():
+    try:
+        return any("avx2" in line.split() for line in open("/proc/cpuinfo") if line.startswith("flags"))
+    except OSError:
+        return False
+
+
+class test_anykernel(unittest.TestCase):
+    """
+    ukropt-sweep's any-kernel mode: a packm kernel called through its own
+    symbol, its arguments from its layouts and sizes, timed at working sets
+    filling levels or at loop counts - and a gemm kernel the same way
+    """
+    def sweep(self, *args):
+        configs = ukrgen_configs()
+        if configs is None:
+            self.skipTest("no ukrgen checkout")
+        with tempfile.TemporaryDirectory() as out:
+            r = subprocess.run([sys.executable, "-m", "ukropt.sweep", os.path.join(configs, args[0]), *args[1:],
+                                "--out", out, "--reps", "2", "--iterations", "4"],
+                               capture_output=True, text=True, timeout=1800)
+            self.assertEqual(0, r.returncode, r.stderr[-2000:] or r.stdout[-2000:])
+            return r.stdout, out
+
+    def test_packm_levels(self):
+        if not (shutil.which("gcc") and has_avx2()):
+            self.skipTest("needs gcc and an AVX2 CPU")
+        said, _ = self.sweep(os.path.join("avx2", "fma_bc_blocks", "dpackm.yaml"), "--family", "pk",
+                             "--case", "trans", "--size", "4", "--levels", "L1=8K,L2=64K",
+                             "--cflags=-O2 -mavx2 -mfma")
+        self.assertIn("per level (L1, L2)", said)
+        self.assertRegex(said, r"L1: +[\d.]+ \(\d+\) +[\d.]+ B \| L2:")
+
+    def test_gemm_any(self):
+        if not (shutil.which("gcc") and has_avx2()):
+            self.skipTest("needs gcc and an AVX2 CPU")
+        said, _ = self.sweep(os.path.join("avx2", "fma_bc_blocks", "dgemm.yaml"), "--family", "vm",
+                             "--size", "1x4", "--any", "--loop", "16,32,48", "--cflags=-O2 -mavx2 -mfma")
+        self.assertIn("per loop step", said)
+
+    def test_packm_builds_rvv(self):
+        cc, cflags = TARGETS["rvv"]
+        if not shutil.which(cc):
+            self.skipTest("no RISC-V compiler")
+        _, _ = self.sweep(os.path.join("rvv", "fma_vf", "dpackm.yaml"), "--family", "pk", "--case", "trans",
+                          "--size", "3", "--levels", "L1=16K", "--build-only", "--cc", cc, f"--cflags={cflags}")
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -17,6 +17,16 @@ settings are ranked. Cycles from Linux's perf_event_open, else wall-clock time -
 the data type is the config's own - sgemm.yaml is FP32, dgemm.yaml FP64 -
 unless --dt names it, so a file named otherwise (gemm-fp32.yaml) can be swept
 
+any-kernel mode - packm families always, gemm with --any: the kernel called
+through its own symbol, its arguments from what it says of itself (its loop's
+count, its components' bases and strides from the family's layouts, packed
+tightly, and its sizes) - no BLIS wrapper; timed at loop counts (--loop, a
+line fitted as for k) or at working sets filling cache levels (--levels, the
+loop count whose components take them: a time a loop step and bytes a cycle):
+
+  ukropt-sweep ukrconfig/avx2/fma_bc_blocks/dpackm.yaml --family pk --case trans \\
+      --size 8 --levels L1=16K,L2=512K,L3=16M,MEM=1G [--grid grid.yaml]
+
 grid.yaml - family keys or flow parameters to lists of values:
   sched-cycle-slots: ["2:vl|vs|vf,sl,i", "3:vf|vs|vf,vl|vs|vf,sl,sl,i;vf-sl"]
   buckets: [null, "vf:5", "vf:8"]
@@ -45,6 +55,7 @@ except ImportError:
 from ukrgen.injectors.blis.families import configuration, family, build_gemm, key_params  # noqa: E402
 from ukrgen.injectors.blis.cgen import gemm_wrapper, asm_source, vl_helpers, c_expr      # noqa: E402
 from ukrgen.flow.isa_map import make_generator                                          # noqa: E402
+from ukropt import anykernel                                                            # noqa: E402
 
 DRIVER = r"""
 #include <stdio.h>
@@ -77,6 +88,7 @@ static double now(void)
     if (cycles_fd >= 0) { uint64_t c = 0; if (read(cycles_fd, &c, sizeof c) == sizeof c) return (double)c; }
     struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e9 + t.tv_nsec;
 }
+UKRSWEEP_GEMM
 typedef void (*ukr_t)(dim_t, dim_t, dim_t, const void*, const void*, const void*, const void*, void*,
                       inc_t, inc_t, const auxinfo_t*, const cntx_t*);
 static double best(ukr_t f, dim_t mr, dim_t nr, dim_t k, const WT* a, const WT* b, WT* c, int reps)
@@ -139,6 +151,11 @@ VARIANTS
     return 0;
 }
 """
+
+
+# the drivers' shared head - includes, counters, the clock - and gemm's own
+DRIVER_COMMON, _, _GEMM = DRIVER.partition("UKRSWEEP_GEMM\n")
+DRIVER = DRIVER_COMMON + _GEMM
 
 
 def load_prologue(name: str | None) -> str:
@@ -230,10 +247,23 @@ def build_variant(job):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("config", help="a gemm family file (ukrconfig/<isa>/<config>/dgemm.yaml)")
+    p.add_argument("config", help="a family file (ukrconfig/<isa>/<config>/dgemm.yaml, dpackm.yaml)")
     p.add_argument("--family", required=True)
-    p.add_argument("--size", required=True, help="MxN in the family's units: 2x14")
-    p.add_argument("--grid", required=True, help="YAML: family keys or flow parameters to lists of values")
+    p.add_argument("--size", required=True,
+                   help="MxN in the family's units (2x14), a packm case's rows (8)")
+    p.add_argument("--grid", default=None,
+                   help="YAML: family keys or flow parameters to lists of values (none: the family's own)")
+    p.add_argument("--kind", default=None, choices=["gemm", "packm"],
+                   help="the family file's kind (default: its name - dpackm.yaml packm, else gemm)")
+    p.add_argument("--case", default=None, help="a packm family's case: vec, gather, trans (default: its first)")
+    p.add_argument("--any", action="store_true",
+                   help="any-kernel mode for gemm too (packm always): the kernel called through its own "
+                        "symbol, its arguments from its layouts and sizes - no BLIS wrapper")
+    p.add_argument("--loop", default=None,
+                   help="any-kernel mode: the loop's counts to time, a line fitted (default: --k's)")
+    p.add_argument("--levels", default=None,
+                   help="any-kernel mode: working sets to fill, NAME=BYTES - L1=32K,L2=1M,L3=16M,MEM=1G - "
+                        "each timed at the loop count whose components take them, its rate in bytes")
     p.add_argument("--sample", type=int, default=None, help="a random sample of the combinations")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--cc", default="gcc")
@@ -279,16 +309,29 @@ def main():
                         "name - sgemm.yaml is FP32, dgemm.yaml FP64)")
     args = p.parse_args()
 
+    kind = args.kind or ("packm" if "packm" in os.path.basename(args.config) else "gemm")
+    anyk = args.any or "gemm" != kind
+    if (args.loop or args.levels) and not anyk:
+        sys.exit("--loop and --levels are any-kernel mode's (--any)")
     dtype = args.dt or dtype_of(args.config)
-    cfg = configuration.from_files({("gemm", dtype): args.config})
+    cfg = configuration.from_files({(kind, dtype): args.config})
     base = next(f for f in cfg.families if f.name == args.family)
-    m, n = (int(x) for x in args.size.lower().split("x"))
-    grid = yaml.safe_load(open(args.grid))
-    variants = combinations(grid, args.sample, args.seed)
-    jobs = [(i, v, args.config, dtype, args.family, m, n) for i, v in enumerate(variants)]
+    size = tuple(int(x) for x in args.size.lower().split("x"))
+    if "gemm" == kind and 2 != len(size):
+        sys.exit("--size MxN for a gemm family")
+    grid = yaml.safe_load(open(args.grid)) if args.grid else {}
+    variants = combinations(grid, args.sample, args.seed) if grid else [{}]
+    if anyk:
+        case = args.case or (base.cases[0][0] if "packm" == kind else None)
+        jobs = [(i, v, args.config, kind, dtype, args.family, case, size) for i, v in enumerate(variants)]
+        worker = anykernel.build_any_variant
+    else:
+        m, n = size
+        jobs = [(i, v, args.config, dtype, args.family, m, n) for i, v in enumerate(variants)]
+        worker = build_variant
     from concurrent.futures import ProcessPoolExecutor
     with ProcessPoolExecutor(max_workers=args.jobs) as pool:
-        results = list(pool.map(build_variant, jobs))
+        results = list(pool.map(worker, jobs))
     built = [r for r in results if "asm" in r]
     for r in results:
         if "error" in r:
@@ -301,7 +344,7 @@ def main():
     offsets = [int(o) for o in args.align.split(",") if o.strip()]
     gen = make_generator(cfg.isa)
     sources, calls, wrappers, helpers = [], [], [], []
-    for r in built:
+    for r in ([] if anyk else built):
         for o in offsets:
             # a copy a placement: its own symbol, its own object, o bytes past
             # a 64-byte boundary
@@ -318,11 +361,23 @@ def main():
                          f'{args.reps})); fflush(stdout); _exit(0); }} int st = 0; waitpid(p, &st, 0); '
                          f'if (!WIFEXITED(st) || WEXITSTATUS(st)) {{ printf("crashed {r["i"]} {o} %d\\n", '
                          f'WIFSIGNALED(st) ? WTERMSIG(st) : WEXITSTATUS(st)); fflush(stdout); }} }}')
-    helpers = "".join(dict.fromkeys(helpers))
     stub = blis_stub()
-    driver = ("#define _GNU_SOURCE\n#include <sched.h>\n#include <stdlib.h>\n"
-              + load_prologue(args.use_prologue) + f"#define WT {ctype}\n#define ITERS {args.iterations}\n" + stub + helpers
-              + "".join(wrappers) + DRIVER.replace("VARIANTS", "\n".join(calls)))
+    prefix = ("#define _GNU_SOURCE\n#include <sched.h>\n#include <stdlib.h>\n"
+              + load_prologue(args.use_prologue) + f"#define WT {ctype}\n#define ITERS {args.iterations}\n" + stub)
+    if anyk:
+        # each kernel called through its own symbol, its arguments from its
+        # layouts and sizes
+        head, variants_c, placed = anykernel.any_driver(built, dtype, offsets, args.reps)
+        for r, o, sym in placed:
+            sources.append(os.path.join(args.out, f"kernel{r['i']}_a{o}.s"))
+            with open(sources[-1], "w") as f:
+                f.write(gen.asmwrap(".text") + gen.align(64, o) + r["asm"].replace(r["symbol"], sym))
+            helpers.append(r["helpers"].replace(r["symbol"], sym))
+        driver = (prefix + "".join(dict.fromkeys(helpers)) + "static WT one = 1;\n" + DRIVER_COMMON + head
+                  + anykernel.ANY_DRIVER.replace("VARIANTS", variants_c))
+    else:
+        helpers = "".join(dict.fromkeys(helpers))
+        driver = prefix + helpers + "".join(wrappers) + DRIVER.replace("VARIANTS", "\n".join(calls))
     with open(os.path.join(args.out, "driver.c"), "w") as f:
         f.write(driver)
     with open(os.path.join(args.out, "variants.yaml"), "w") as f:
@@ -352,7 +407,7 @@ def main():
             break
     if r.returncode:
         sys.exit(r.stderr[:2000])
-    ks = [k for k in args.k.split(",") if k]
+    ks = [k for k in ((args.levels or args.loop or args.k) if anyk else args.k).split(",") if k]
     if args.build_only:
         print(f"built {exe}: run '{exe} {' '.join(ks)}' on the target; variants in {args.out}/variants.yaml")
         return
@@ -391,6 +446,9 @@ def main():
     if not found:
         sys.exit("the benchmark printed nothing")
     unit = found.group(1)
+    if anyk and args.levels:
+        anykernel.report_levels(runs, {r["i"]: r["settings"] for r in built}, unit)
+        return
     # per core: each point the median of its runs, a line per variant and
     # placement - least squares, t = call + step * k, its worst residual -
     # and per variant its best placement: (step, worst step, call, worst
@@ -432,10 +490,10 @@ def main():
     many, multi = len(offsets) > 1, len(cpus) > 1
     if multi:
         cols = " | ".join(f"core {c}" + (" @best offset" if many else "") for c in cpus)
-        print(f"{unit} per k step, {rank} over cores | {cols} | per call outside the loop | "
+        print(f"{unit} per {'loop' if anyk else 'k'} step, {rank} over cores | {cols} | per call outside the loop | "
               "worst residual | settings")
     else:
-        print(f"{unit} per k step" + (" (best at offset .. worst)" if many else "")
+        print(f"{unit} per {'loop' if anyk else 'k'} step" + (" (best at offset .. worst)" if many else "")
               + " | per call outside the loop | worst residual | settings")
     for i in rows:
         flag = "?" if resid[i] > limit else " "
