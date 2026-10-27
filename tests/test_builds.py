@@ -214,6 +214,21 @@ class test_blislike(unittest.TestCase):
         self.assertRegex(said, r"variant 0 \{'dispatch': \['gather', 'trans'\]\}:\n +n +64 [^\n]*: gather4 ")
         self.assertRegex(said, r"variant 1 \{'dispatch': \['trans', 'gather'\]\}:\n +n +64 [^\n]*: trans4 ")
 
+    def test_vec_rest_swept(self):
+        # 9 rows of columns: vec8 and the reference's row - or, vec-rest 0,
+        # no case
+        if not (shutil.which("gcc") and has_avx2()):
+            self.skipTest("needs gcc and an AVX2 CPU")
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as grid:
+            grid.write("vec-rest: [16, 0]\n")
+        try:
+            said = self.sweep(os.path.join("avx2", "fma_bc_blocks", "dpackm.yaml"), "--blis", "cdim=9",
+                              "--grid", grid.name, "--loop", "64", "--cflags=-O2 -mavx2 -mfma")
+        finally:
+            os.unlink(grid.name)
+        self.assertRegex(said, r"variant 0 \{'vec-rest': 16\}:\n +n +64 [^\n]*: vec8 \+ reference x1")
+        self.assertRegex(said, r"variant 1 \{'vec-rest': 0\}:\n +n +64 [^\n]*: reference x1 \(no case\)")
+
     def test_builds_rvv(self):
         cc, cflags = TARGETS["rvv"]
         if not shutil.which(cc):

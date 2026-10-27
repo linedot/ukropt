@@ -226,6 +226,9 @@ def build_blis_variant(job):
         unknown = [d for d in fam.dispatch or [] if d not in fam.case_kinds]
         if unknown:
             return {"i": i, "settings": settings, "error": f"dispatch names no case {unknown}"}
+    if "vec-rest" in flow:
+        # the rows a vec or gather case packs beyond its own
+        fam.vec_rest = flow.pop("vec-rest")
     cases = []
     for case, ms, params in fam.cases:
         # --case: kept by name or kind
@@ -244,7 +247,8 @@ def build_blis_variant(job):
     ch = {"FP64": "d", "FP32": "s"}[dtype]
     return {"i": i, "settings": settings, "name": name, "ch": ch,
             "asm": [(asm_symbol(k), asm_source(k)) for k in built],
-            "dispatch": instrument(packm_dispatch(name, dtype, built, fam.dispatch), built, name, ch),
+            "dispatch": instrument(packm_dispatch(name, dtype, built, fam.dispatch, fam.vec_rest),
+                                   built, name, ch),
             "helpers": vl_helpers(built, make_generator(cfg.isa)),
             # each case as its symbol ends: its kind and rows (vec8, trans4)
             "cases": [k.symbol.rsplit("_", 1)[1] for k in built],
