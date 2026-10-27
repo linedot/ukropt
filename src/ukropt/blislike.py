@@ -109,10 +109,19 @@ void ukrsweep_ref( conj_t conja, pack_t schema, dim_t cdim, dim_t cdim_max, dim_
                    dim_t n_max, const void* kappa, const void* a, inc_t inca, inc_t lda, void* p, inc_t ldp,
                    const void* params, const cntx_t* cntx )
 {
+    /* as BLIS's reference packs: a column at a time, a copy where kappa is
+       1, the edges zeroed apart - a naive loop (a branch an element) made
+       \"a case and the reference\" look far costlier than BLIS's does */
     const WT k = *( const WT* )kappa; const WT* A = a; WT* P = p;
     ukrsweep_refs++;
-    for ( dim_t j = 0; j < n_max; j++ ) for ( dim_t i = 0; i < cdim_max; i++ )
-        P[ i + j * ldp ] = ( i < cdim && j < n ) ? k * A[ i * inca + j * lda ] : 0;
+    for ( dim_t j = 0; j < n; j++ )
+    {
+        const WT* aj = A + j * lda; WT* pj = P + j * ldp;
+        if ( ( WT )1 == k ) for ( dim_t i = 0; i < cdim; i++ ) pj[ i ] = aj[ i * inca ];
+        else                for ( dim_t i = 0; i < cdim; i++ ) pj[ i ] = k * aj[ i * inca ];
+        for ( dim_t i = cdim; i < cdim_max; i++ ) pj[ i ] = 0;
+    }
+    for ( dim_t j = n; j < n_max; j++ ) for ( dim_t i = 0; i < cdim_max; i++ ) P[ i + j * ldp ] = 0;
 }
 """
 
