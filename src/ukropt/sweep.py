@@ -28,14 +28,14 @@ loop count whose components take them: a time a loop step and bytes a cycle):
       --size 8 --levels L1=16K,L2=512K,L3=16M,MEM=1G [--grid grid.yaml]
 
 BLIS-like packm mode (--blis) - a packm family called as BLIS calls it, through
-ukrgen's dispatch with BLIS's arguments (cdim, inca, lda, ldp; lda or inca 0:
-tight), at numbers of columns: the case each call falls into (or the
+ukrgen's dispatch with BLIS's arguments (cdim, inca, lda, ldp - strides in
+elements, as BLIS's), at numbers of columns: the case each call falls into (or the
 reference, or both for what a case leaves), its panel checked against the
 reference's (the run fails where one differs), its time a call and a column;
 --case keeps only some kinds of case, the dispatch falling into what's left:
 
   ukropt-sweep ukrconfig/avx2/fma_bc_blocks/dpackm.yaml --family pk \\
-      --blis cdim=4,inca=0,lda=1,ldp=4 --loop 64,256,1001 [--case trans]
+      --blis cdim=4,inca=1024,lda=1,ldp=4 --loop 64,256,1001 [--case trans]
 
 grid.yaml - family keys or flow parameters to lists of values:
   sched-cycle-slots: ["2:vl|vs|vf,sl,i", "3:vf|vs|vf,vl|vs|vf,sl,sl,i;vf-sl"]
@@ -264,8 +264,9 @@ def main():
     p.add_argument("--blis", default=None,
                    help="BLIS-like packm mode: the family called as BLIS calls it, through ukrgen's dispatch "
                         "with these arguments - cdim=8,inca=1,lda=1024,ldp=8 (cdim_max, n_extra, kappa; "
-                        "lda or inca 0: tight) - at numbers of columns --loop: the case it falls into, "
-                        "its panel checked against the reference's, its time")
+                        "strides in elements as BLIS's, lda cdim where inca is 1 and lda isn't given) - at "
+                        "numbers of columns --loop: the case it falls into, its panel checked against the "
+                        "reference's, its time")
     p.add_argument("--grid", default=None,
                    help="YAML: family keys or flow parameters to lists of values (none: the family's own)")
     p.add_argument("--kind", default=None, choices=["gemm", "packm"],
@@ -544,6 +545,8 @@ def blis_mode(args, kind: str):
     if "packm" != kind:
         sys.exit("--blis: a packm family file")
     call = blislike.parse_call(args.blis)
+    ns = [n for n in (args.loop or args.k).split(",") if n]
+    blislike.check_call(call, [int(n) for n in ns])
     dtype = args.dt or dtype_of(args.config)
     cfg = configuration.from_files({(kind, dtype): args.config})
     grid = yaml.safe_load(open(args.grid)) if args.grid else {}
@@ -582,7 +585,6 @@ def blis_mode(args, kind: str):
                        capture_output=True, text=True)
     if r.returncode:
         sys.exit(r.stderr[:2000])
-    ns = [n for n in (args.loop or args.k).split(",") if n]
     if args.build_only:
         print(f"built {exe}: run '{exe} {' '.join(ns)}' on the target; variants in {args.out}/variants.yaml")
         return

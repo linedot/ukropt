@@ -159,22 +159,31 @@ class test_blislike(unittest.TestCase):
         dpackm = os.path.join("avx2", "fma_bc_blocks", "dpackm.yaml")
         flags = "--cflags=-O2 -mavx2 -mfma"
         # columns contiguous: a vec case
-        self.assertRegex(self.sweep(dpackm, "--blis", "cdim=8,inca=1,lda=0,ldp=8", "--loop", "64", flags),
+        self.assertRegex(self.sweep(dpackm, "--blis", "cdim=8,inca=1,ldp=8", "--loop", "64", flags),
                          r"n +64 \(inca 1, lda 8\): vec8 ")
         # rows contiguous: the gather case first - or, kept alone, the
         # transpose in registers, the reference taking the last column of 9
-        self.assertIn("gather4", self.sweep(dpackm, "--blis", "cdim=4,inca=0,lda=1,ldp=4", "--loop", "64", flags))
-        said = self.sweep(dpackm, "--blis", "cdim=4,inca=0,lda=1,ldp=4", "--case", "trans", "--loop", "64,9", flags)
-        self.assertRegex(said, r"n +64 \(inca 64, lda 1\): trans4 ")
-        self.assertRegex(said, r"n +9 \(inca 9, lda 1\): trans4 \+ reference x1")
+        self.assertIn("gather4", self.sweep(dpackm, "--blis", "cdim=4,inca=1024,lda=1,ldp=4", "--loop", "64", flags))
+        said = self.sweep(dpackm, "--blis", "cdim=4,inca=1024,lda=1,ldp=4", "--case", "trans", "--loop", "64,9", flags)
+        self.assertRegex(said, r"n +64 \(inca 1024, lda 1\): trans4 ")
+        self.assertRegex(said, r"n +9 \(inca 1024, lda 1\): trans4 \+ reference x1")
         # no case of 3 rows along the panel: the reference
-        self.assertIn("reference x1", self.sweep(dpackm, "--blis", "cdim=3,inca=0,lda=1,ldp=3", "--loop", "64", flags))
+        self.assertIn("reference x1", self.sweep(dpackm, "--blis", "cdim=3,inca=1024,lda=1,ldp=3", "--loop", "64", flags))
+
+    def test_strides_as_blis(self):
+        # strides in elements, as BLIS's: none below 1, none overlapping
+        from ukropt.blislike import parse_call, check_call
+        self.assertEqual(8, parse_call("cdim=8")["lda"])
+        for call, ns in (("cdim=4,inca=0,lda=1", [64]), ("cdim=4,inca=1,lda=0", [64]),
+                         ("cdim=4,inca=64,lda=1", [65]), ("cdim=8,inca=1,lda=4", [16]), ("cdim=4,inca=2", [8])):
+            with self.subTest(call=call), self.assertRaises(SystemExit):
+                check_call(parse_call(call), ns)
 
     def test_builds_rvv(self):
         cc, cflags = TARGETS["rvv"]
         if not shutil.which(cc):
             self.skipTest("no RISC-V compiler")
-        self.sweep(os.path.join("rvv", "fma_vf", "dpackm.yaml"), "--blis", "cdim=4,inca=0,lda=1,ldp=4",
+        self.sweep(os.path.join("rvv", "fma_vf", "dpackm.yaml"), "--blis", "cdim=4,inca=1024,lda=1,ldp=4",
                    "--build-only", "--cc", cc, f"--cflags={cflags}")
 
 if __name__ == "__main__":

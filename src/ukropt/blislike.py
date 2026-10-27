@@ -16,8 +16,8 @@ from ukrgen.flow.isa_map import make_generator
 
 from .anykernel import apply_settings
 
-#: BLIS's packm arguments the mode takes; 0 for lda (inca 1) or inca (lda 1):
-#: tight - the columns (rows) as long as cdim (n); n_max: n plus extra
+#: BLIS's packm arguments the mode takes, strides in elements as BLIS's (1:
+#: the next element the next one); n_max: n plus extra
 KEYS = ("cdim", "cdim_max", "inca", "lda", "ldp", "n_extra", "kappa")
 
 BLIS_DRIVER = r"""
@@ -51,18 +51,14 @@ static void measure_blis(int v, packf f, int nreq, char** req, int reps)
 {
     dim_t ns[64]; int n = 0; dim_t nmax = 1;
     for (int r = 0; r < nreq && n < 64; ++r) { ns[n] = atol(req[r]); if (ns[n] < 1) ns[n] = 1; if (ns[n] > nmax) nmax = ns[n]; ++n; }
-    const dim_t inca_max = INCA ? INCA : (LDA == 1 ? nmax : 1);
-    const dim_t lda_max = LDA ? LDA : (INCA == 1 ? CDIM : 1);
-    size_t na = (size_t)(CDIM - 1) * inca_max + (size_t)(nmax - 1) * lda_max + 1 + 64;
+    size_t na = (size_t)(CDIM - 1) * INCA + (size_t)(nmax - 1) * LDA + 1 + 64;
     size_t np = (size_t)LDP * (nmax + N_EXTRA) + 64;
     WT* A = aligned_alloc(256, (na * sizeof(WT) + 255) / 256 * 256);
     WT* P = aligned_alloc(256, (np * sizeof(WT) + 255) / 256 * 256);
     WT* R = aligned_alloc(256, (np * sizeof(WT) + 255) / 256 * 256);
     for (size_t e = 0; e < na; ++e) A[e] = (WT)((e % 13) - 6);
     for (int r = 0; r < n; ++r) {
-        const dim_t nn = ns[r];
-        const dim_t inca = INCA ? INCA : (LDA == 1 ? nn : 1);
-        const dim_t lda = LDA ? LDA : (INCA == 1 ? CDIM : 1);
+        const dim_t nn = ns[r], inca = INCA, lda = LDA;
         const WT kappa = KAPPA;
         for (size_t e = 0; e < np; ++e) P[e] = R[e] = (WT)-99;
         ukrsweep_ref(0, 0, CDIM, CDIM_MAX, 1, nn, nn + N_EXTRA, &kappa, A, inca, lda, R, LDP, NULL, NULL);
@@ -123,10 +119,12 @@ void ukrsweep_ref( conj_t conja, pack_t schema, dim_t cdim, dim_t cdim_max, dim_
 
 def parse_call(text: str) -> dict:
     """
-    --blis cdim=8,inca=1,lda=1024,ldp=8: cdim needed; cdim_max cdim, ldp
-    cdim_max, inca 1, lda 0 (tight), n_extra 0 (n_max = n), kappa 1 by default
+    --blis cdim=8,inca=1,lda=1024,ldp=8: BLIS's arguments, strides in
+    elements as BLIS's. cdim needed; by default cdim_max cdim, ldp cdim_max,
+    inca 1, lda cdim where inca is 1 (the columns adjacent, as tight as they
+    go), n_extra 0 (n_max = n), kappa 1
     """
-    args = {"cdim": None, "cdim_max": None, "inca": 1, "lda": 0, "ldp": None, "n_extra": 0, "kappa": 1.0}
+    args = {"cdim": None, "cdim_max": None, "inca": 1, "lda": None, "ldp": None, "n_extra": 0, "kappa": 1.0}
     for part in (p for p in text.split(",") if p.strip()):
         key, _, value = part.partition("=")
         key = key.strip()
@@ -137,11 +135,31 @@ def parse_call(text: str) -> dict:
         raise SystemExit("--blis needs cdim")
     args["cdim_max"] = args["cdim_max"] or args["cdim"]
     args["ldp"] = args["ldp"] or args["cdim_max"]
+    if args["lda"] is None:
+        if 1 != args["inca"]:
+            raise SystemExit("--blis: lda - where inca isn't 1, the columns' stride isn't cdim")
+        args["lda"] = args["cdim"]
     if args["cdim_max"] < args["cdim"] or args["ldp"] < args["cdim_max"]:
         raise SystemExit("--blis: cdim <= cdim_max <= ldp")
-    if 1 != args["inca"] and 1 != args["lda"] and (0 == args["inca"] or 0 == args["lda"]):
-        raise SystemExit("--blis: a tight (0) inca or lda needs the other 1")
+    if args["inca"] < 1 or args["lda"] < 1:
+        raise SystemExit("--blis: inca and lda are strides of at least 1 element (1: the next element)")
     return args
+
+
+def check_call(call: dict, ns: list):
+    """
+    The elements apart for every n timed: the columns adjacent (inca 1) at
+    least cdim apart, the rows adjacent (lda 1) at least the most columns
+    apart; else one stride nesting the other
+    """
+    n = max(ns)
+    inca, lda, cdim = call["inca"], call["lda"], call["cdim"]
+    if 1 == inca and lda < cdim:
+        raise SystemExit(f"--blis: lda {lda} - the columns overlap; at least cdim, {cdim}")
+    if 1 == lda and 1 != inca and inca < n:
+        raise SystemExit(f"--blis: inca {inca} - the rows overlap at {n} columns; at least {n}")
+    if 1 != inca and 1 != lda and lda < cdim * inca and inca < n * lda:
+        raise SystemExit(f"--blis: inca {inca}, lda {lda} - the elements overlap at {n} columns")
 
 
 def instrument(dispatch: str, built: list, name: str, ch: str) -> str:
