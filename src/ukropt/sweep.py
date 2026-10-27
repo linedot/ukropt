@@ -27,6 +27,16 @@ loop count whose components take them: a time a loop step and bytes a cycle):
   ukropt-sweep ukrconfig/avx2/fma_bc_blocks/dpackm.yaml --family pk --case trans \\
       --size 8 --levels L1=16K,L2=512K,L3=16M,MEM=1G [--grid grid.yaml]
 
+BLIS-like packm mode (--blis) - a packm family called as BLIS calls it, through
+ukrgen's dispatch with BLIS's arguments (cdim, inca, lda, ldp; lda or inca 0:
+tight), at numbers of columns: the case each call falls into (or the
+reference, or both for what a case leaves), its panel checked against the
+reference's (the run fails where one differs), its time a call and a column;
+--case keeps only some kinds of case, the dispatch falling into what's left:
+
+  ukropt-sweep ukrconfig/avx2/fma_bc_blocks/dpackm.yaml --family pk \\
+      --blis cdim=4,inca=0,lda=1,ldp=4 --loop 64,256,1001 [--case trans]
+
 grid.yaml - family keys or flow parameters to lists of values:
   sched-cycle-slots: ["2:vl|vs|vf,sl,i", "3:vf|vs|vf,vl|vs|vf,sl,sl,i;vf-sl"]
   buckets: [null, "vf:5", "vf:8"]
@@ -55,7 +65,7 @@ except ImportError:
 from ukrgen.injectors.blis.families import configuration, family, build_gemm, key_params  # noqa: E402
 from ukrgen.injectors.blis.cgen import gemm_wrapper, asm_source, vl_helpers, c_expr      # noqa: E402
 from ukrgen.flow.isa_map import make_generator                                          # noqa: E402
-from ukropt import anykernel                                                            # noqa: E402
+from ukropt import anykernel, blislike                                                  # noqa: E402
 
 DRIVER = r"""
 #include <stdio.h>
@@ -249,13 +259,20 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("config", help="a family file (ukrconfig/<isa>/<config>/dgemm.yaml, dpackm.yaml)")
     p.add_argument("--family", required=True)
-    p.add_argument("--size", required=True,
+    p.add_argument("--size", default=None,
                    help="MxN in the family's units (2x14), a packm case's rows (8)")
+    p.add_argument("--blis", default=None,
+                   help="BLIS-like packm mode: the family called as BLIS calls it, through ukrgen's dispatch "
+                        "with these arguments - cdim=8,inca=1,lda=1024,ldp=8 (cdim_max, n_extra, kappa; "
+                        "lda or inca 0: tight) - at numbers of columns --loop: the case it falls into, "
+                        "its panel checked against the reference's, its time")
     p.add_argument("--grid", default=None,
                    help="YAML: family keys or flow parameters to lists of values (none: the family's own)")
     p.add_argument("--kind", default=None, choices=["gemm", "packm"],
                    help="the family file's kind (default: its name - dpackm.yaml packm, else gemm)")
-    p.add_argument("--case", default=None, help="a packm family's case: vec, gather, trans (default: its first)")
+    p.add_argument("--case", default=None,
+                   help="a packm family's case: vec, gather, trans (default: its first); with --blis, the "
+                        "case kinds kept, vec,trans - the dispatch falls into what's left")
     p.add_argument("--any", action="store_true",
                    help="any-kernel mode for gemm too (packm always): the kernel called through its own "
                         "symbol, its arguments from its layouts and sizes - no BLIS wrapper")
@@ -310,6 +327,10 @@ def main():
     args = p.parse_args()
 
     kind = args.kind or ("packm" if "packm" in os.path.basename(args.config) else "gemm")
+    if args.blis:
+        return blis_mode(args, kind)
+    if not args.size:
+        sys.exit("--size: MxN for gemm, a packm case's rows")
     anyk = args.any or "gemm" != kind
     if (args.loop or args.levels) and not anyk:
         sys.exit("--loop and --levels are any-kernel mode's (--any)")
@@ -511,6 +532,79 @@ def main():
               "(--runs, --cpu)")
     trusted = [i for i in rows if resid[i] <= limit] or rows
     print("best:\n" + yaml.safe_dump(settings[trusted[0]], sort_keys=False))
+
+
+def blis_mode(args, kind: str):
+    """
+    BLIS-like packm mode (--blis): every variant's whole family and its
+    dispatch in one benchmark, called with BLIS's arguments as given at each
+    number of columns - the case each falls into, the reference's calls,
+    whether its panel is the reference's, its time
+    """
+    if "packm" != kind:
+        sys.exit("--blis: a packm family file")
+    call = blislike.parse_call(args.blis)
+    dtype = args.dt or dtype_of(args.config)
+    cfg = configuration.from_files({(kind, dtype): args.config})
+    grid = yaml.safe_load(open(args.grid)) if args.grid else {}
+    variants = combinations(grid, args.sample, args.seed) if grid else [{}]
+    # --case: the case kinds kept (vec,trans) - the dispatch falls into what's left
+    keep = {c.strip() for c in (args.case or "").split(",") if c.strip()}
+    jobs = [(i, v, args.config, dtype, args.family, keep) for i, v in enumerate(variants)]
+    from concurrent.futures import ProcessPoolExecutor
+    with ProcessPoolExecutor(max_workers=args.jobs) as pool:
+        results = list(pool.map(blislike.build_blis_variant, jobs))
+    built = [r for r in results if "dispatch" in r]
+    for r in results:
+        if "error" in r:
+            print(f"variant {r['i']}: not built - {r['error'][:120]}", file=sys.stderr)
+    if not built:
+        sys.exit("no variant built")
+    os.makedirs(args.out, exist_ok=True)
+    gen = make_generator(cfg.isa)
+    sources = []
+    for r in built:
+        for j, (sym, asm) in enumerate(r["asm"]):
+            sources.append(os.path.join(args.out, f"variant{r['i']}_{j}.s"))
+            with open(sources[-1], "w") as f:
+                f.write(gen.asmwrap(".text") + gen.align(64, 0) + asm)
+    head, variants_c = blislike.blis_driver(built, call, args.reps)
+    driver = ("#define _GNU_SOURCE\n#include <sched.h>\n#include <stdlib.h>\n" + load_prologue(args.use_prologue)
+              + f"#define WT {CTYPE[dtype]}\n#define ITERS {args.iterations}\n" + blis_stub()
+              + "".join(dict.fromkeys(r["helpers"] for r in built)) + DRIVER_COMMON + head
+              + blislike.BLIS_DRIVER.replace("VARIANTS", variants_c))
+    with open(os.path.join(args.out, "driver.c"), "w") as f:
+        f.write(driver)
+    with open(os.path.join(args.out, "variants.yaml"), "w") as f:
+        yaml.safe_dump({r["i"]: r["settings"] for r in built}, f, sort_keys=False)
+    exe = os.path.join(args.out, "bench")
+    r = subprocess.run([args.cc, *args.cflags.split(), "-o", exe, os.path.join(args.out, "driver.c"), *sources],
+                       capture_output=True, text=True)
+    if r.returncode:
+        sys.exit(r.stderr[:2000])
+    ns = [n for n in (args.loop or args.k).split(",") if n]
+    if args.build_only:
+        print(f"built {exe}: run '{exe} {' '.join(ns)}' on the target; variants in {args.out}/variants.yaml")
+        return
+    if args.remote:
+        host, _, where = args.remote.partition(":")
+        where = where or "."
+        r = subprocess.run(["scp", exe, f"{host}:{where}/ukrsweep_bench"], capture_output=True, text=True)
+        if r.returncode:
+            sys.exit(f"scp failed: {r.stderr}")
+        out = subprocess.run(["ssh", host, f"cd {where} && ./ukrsweep_bench {' '.join(ns)}"],
+                             capture_output=True, text=True, timeout=3600).stdout
+    else:
+        env = dict(os.environ, **({"UKRSWEEP_CPU": str(args.cpu).split(",")[0]} if args.cpu is not None else {}))
+        out = subprocess.run([exe, *ns], capture_output=True, text=True, timeout=3600, env=env).stdout
+    for i, _, sig in sorted(set(re.findall(r"crashed (\d+) (\d+) (-?\d+)", out))):
+        print(f"variant {i}: crashed (signal or status {sig})", file=sys.stderr)
+    found = re.search(r"# unit (\w+)", out)
+    if not found:
+        sys.exit("the benchmark printed nothing")
+    esize = 8 if "FP64" == dtype else 4
+    if not blislike.report_blis({None: out}, built, call, found.group(1), esize):
+        sys.exit(1)
 
 
 if __name__ == "__main__":

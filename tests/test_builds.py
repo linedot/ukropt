@@ -135,6 +135,48 @@ class test_anykernel(unittest.TestCase):
         _, _ = self.sweep(os.path.join("rvv", "fma_vf", "dpackm.yaml"), "--family", "pk", "--case", "trans",
                           "--size", "3", "--levels", "L1=16K", "--build-only", "--cc", cc, f"--cflags={cflags}")
 
+
+class test_blislike(unittest.TestCase):
+    """
+    ukropt-sweep's BLIS-like packm mode: a family called through ukrgen's
+    dispatch with BLIS's arguments - the case it falls into, its panel
+    checked against the reference's (the run fails where one differs)
+    """
+    def sweep(self, *args):
+        configs = ukrgen_configs()
+        if configs is None:
+            self.skipTest("no ukrgen checkout")
+        with tempfile.TemporaryDirectory() as out:
+            r = subprocess.run([sys.executable, "-m", "ukropt.sweep", os.path.join(configs, args[0]), *args[1:],
+                                "--family", "pk", "--out", out, "--reps", "2", "--iterations", "4"],
+                               capture_output=True, text=True, timeout=1800)
+            self.assertEqual(0, r.returncode, r.stderr[-2000:] or r.stdout[-2000:])
+            return r.stdout
+
+    def test_cases_fallen_into(self):
+        if not (shutil.which("gcc") and has_avx2()):
+            self.skipTest("needs gcc and an AVX2 CPU")
+        dpackm = os.path.join("avx2", "fma_bc_blocks", "dpackm.yaml")
+        flags = "--cflags=-O2 -mavx2 -mfma"
+        # columns contiguous: a vec case
+        self.assertRegex(self.sweep(dpackm, "--blis", "cdim=8,inca=1,lda=0,ldp=8", "--loop", "64", flags),
+                         r"n +64 \(inca 1, lda 8\): vec8 ")
+        # rows contiguous: the gather case first - or, kept alone, the
+        # transpose in registers, the reference taking the last column of 9
+        self.assertIn("gather4", self.sweep(dpackm, "--blis", "cdim=4,inca=0,lda=1,ldp=4", "--loop", "64", flags))
+        said = self.sweep(dpackm, "--blis", "cdim=4,inca=0,lda=1,ldp=4", "--case", "trans", "--loop", "64,9", flags)
+        self.assertRegex(said, r"n +64 \(inca 64, lda 1\): trans4 ")
+        self.assertRegex(said, r"n +9 \(inca 9, lda 1\): trans4 \+ reference x1")
+        # no case of 3 rows along the panel: the reference
+        self.assertIn("reference x1", self.sweep(dpackm, "--blis", "cdim=3,inca=0,lda=1,ldp=3", "--loop", "64", flags))
+
+    def test_builds_rvv(self):
+        cc, cflags = TARGETS["rvv"]
+        if not shutil.which(cc):
+            self.skipTest("no RISC-V compiler")
+        self.sweep(os.path.join("rvv", "fma_vf", "dpackm.yaml"), "--blis", "cdim=4,inca=0,lda=1,ldp=4",
+                   "--build-only", "--cc", cc, f"--cflags={cflags}")
+
 if __name__ == "__main__":
     unittest.main()
 
