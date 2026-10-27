@@ -229,6 +229,39 @@ class test_blislike(unittest.TestCase):
         self.assertRegex(said, r"variant 0 \{'vec-rest': 16\}:\n +n +64 [^\n]*: vec8 \+ reference x1")
         self.assertRegex(said, r"variant 1 \{'vec-rest': 0\}:\n +n +64 [^\n]*: reference x1 \(no case\)")
 
+    def test_structfuse_gridded_under_qemu(self):
+        # a grid toggling structfuse on RVV's trans cases, run under qemu
+        # (--runner): every panel the reference's, the +structfuse variant's
+        # kernels segment stores, the other's strided ones
+        cc, cflags = TARGETS["rvv"]
+        if not (shutil.which(cc) and shutil.which("qemu-riscv64-static")):
+            self.skipTest("needs the RISC-V compiler and qemu")
+        configs = ukrgen_configs()
+        if configs is None:
+            self.skipTest("no ukrgen checkout")
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as grid:
+            grid.write('pre-specialize-irmods: ["+structfuse", "-structfuse"]\n')
+        try:
+            with tempfile.TemporaryDirectory() as out:
+                r = subprocess.run([sys.executable, "-m", "ukropt.sweep",
+                                    os.path.join(configs, "rvv", "fma_vf", "dpackm.yaml"), "--family", "pk",
+                                    "--blis", "cdim=4,lda=1", "--case", "trans", "--grid", grid.name,
+                                    "--loop", "64", "--cc", cc, f"--cflags={cflags} -static",
+                                    "--runner", "qemu-riscv64-static -cpu rv64,v=true,vlen=256,elen=64",
+                                    "--reps", "1", "--iterations", "1", "--out", out],
+                                   capture_output=True, text=True, timeout=1800)
+                self.assertEqual(0, r.returncode, r.stderr[-2000:] or r.stdout[-2000:])
+                # (its note of kernels not built - 15, 16 rows: registers - between)
+                self.assertRegex(r.stdout, r"variant 0 [^\n]*\+structfuse[^\n]*:\n(?:  \([^\n]*\n)? +n +64 [^\n]*: trans4 ")
+                self.assertNotIn("WRONG", r.stdout)
+                stores = {v: "".join(open(os.path.join(out, f)).read() for f in os.listdir(out)
+                                     if f.startswith(f"variant{v}_"))
+                          for v in (0, 1)}
+                self.assertIn("vsseg4e64.v", stores[0])
+                self.assertNotIn("vsseg4e64.v", stores[1])
+        finally:
+            os.unlink(grid.name)
+
     def test_builds_rvv(self):
         cc, cflags = TARGETS["rvv"]
         if not shutil.which(cc):

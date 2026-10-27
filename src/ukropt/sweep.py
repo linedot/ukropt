@@ -49,6 +49,7 @@ import itertools
 import os
 import random
 import re
+import shlex
 import statistics
 import subprocess
 import sys
@@ -316,6 +317,10 @@ def main():
                    help="kernel calls back to back in one measurement")
     p.add_argument("--out", default="ukrsweep")
     p.add_argument("--build-only", action="store_true", help="build the binary, run it elsewhere")
+    p.add_argument("--runner", default=None,
+                   help="a command to run the binary with here - 'qemu-riscv64-static -cpu "
+                        "rv64,v=true,vlen=256': which case a call falls into and whether its panel is "
+                        "right, checked before measuring on the target (the times emulated)")
     p.add_argument("--remote", default=None,
                    help="HOST:DIR - copy the binary there (scp) and run it (ssh): generate and "
                         "cross-compile here, measure on the target")
@@ -436,7 +441,8 @@ def main():
                           file=sys.stderr)
                 outs.append(r.stdout)
             else:
-                outs.append(subprocess.run([exe, *ks], capture_output=True, text=True, timeout=3600,
+                outs.append(subprocess.run([*shlex.split(args.runner or ""), exe, *ks], capture_output=True,
+                                           text=True, timeout=3600,
                                            env=env).stdout)
         runs[cpu] = "\n".join(outs)
     out = "\n".join(runs.values())
@@ -663,6 +669,19 @@ def blis_mode(args, kind: str):
     for r in results:
         if "error" in r:
             print(f"variant {r['i']}: not built - {r['error'][:120]}", file=sys.stderr)
+    # a kernel a variant didn't build said - a call falling into the
+    # reference for it is no case's measurement - and a variant none of
+    # whose kept cases built refused, not measured as the reference
+    kept = []
+    for r in built:
+        for line in r["skipped"]:
+            print(f"variant {r['i']} {r['settings']}: not built {line}", file=sys.stderr)
+        if keep and not any(name in keep or kind in keep for name, kind in r["kept_as"]):
+            print(f"variant {r['i']} {r['settings']}: none of the cases kept ({', '.join(sorted(keep))}) "
+                  f"built - not measured", file=sys.stderr)
+            continue
+        kept.append(r)
+    built = kept
     if not built:
         sys.exit("no variant built")
     os.makedirs(args.out, exist_ok=True)
@@ -701,7 +720,8 @@ def blis_mode(args, kind: str):
             outs.append(subprocess.run(["ssh", host, f"cd {where} && {pin}./ukrsweep_bench {' '.join(ns)}"],
                                        capture_output=True, text=True, timeout=3600).stdout)
         else:
-            outs.append(subprocess.run([exe, *ns], capture_output=True, text=True, timeout=3600, env=env).stdout)
+            outs.append(subprocess.run([*shlex.split(args.runner or ""), exe, *ns], capture_output=True,
+                                       text=True, timeout=3600, env=env).stdout)
     out = "\n".join(outs)
     for i, _, sig in sorted(set(re.findall(r"crashed (\d+) (\d+) (-?\d+)", out))):
         print(f"variant {i}: crashed (signal or status {sig})", file=sys.stderr)

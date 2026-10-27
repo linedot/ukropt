@@ -261,7 +261,9 @@ def build_blis_variant(job):
             "helpers": vl_helpers(built, make_generator(cfg.isa)),
             # each case as its symbol ends: its kind and rows (vec8, trans4)
             "cases": [k.symbol.rsplit("_", 1)[1] for k in built],
-            "skipped": [f"{s[1]}: {str(s[2])[:80]}" for s in skipped]}
+            # each kernel's case: its name and kind (what --case keeps)
+            "kept_as": sorted({(k.case, k.kind or k.case) for k in built}),
+            "skipped": [f"{s[1][0]} of {s[1][1]}: {str(s[2])[:160]}" for s in skipped]}
 
 
 def blis_driver(built: list, call: dict, reps: int) -> tuple[str, str]:
@@ -297,6 +299,9 @@ def report_blis(runs: dict, built: list, call: dict, unit: str, esize: int):
     for v in sorted(per):
         r = by[v]
         print(f"variant {v} {r['settings']}:")
+        if r["skipped"]:
+            print(f"  ({len(r['skipped'])} of its kernels not built - a call falling into the reference for "
+                  f"one is the reference's: see above)")
         for n, pts in sorted(per[v].items()):
             t = statistics.median(p[0] for p in pts)
             case, refs, wrong, inca, lda = pts[0][1:]
