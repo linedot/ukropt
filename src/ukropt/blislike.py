@@ -120,11 +120,13 @@ void ukrsweep_ref( conj_t conja, pack_t schema, dim_t cdim, dim_t cdim_max, dim_
 def parse_call(text: str) -> dict:
     """
     --blis cdim=8,inca=1,lda=1024,ldp=8: BLIS's arguments, strides in
-    elements as BLIS's. cdim needed; by default cdim_max cdim, ldp cdim_max,
-    inca 1, lda cdim where inca is 1 (the columns adjacent, as tight as they
-    go), n_extra 0 (n_max = n), kappa 1
+    elements as BLIS's (1: the next element). cdim needed; by default
+    cdim_max cdim, ldp cdim_max, n_extra 0 (n_max = n), kappa 1. The strides
+    by the layout they give - resolve() completes them, the columns timed
+    known: A's columns contiguous (inca 1, or neither given) lda cdim; its
+    rows contiguous (lda 1) inca the most columns timed
     """
-    args = {"cdim": None, "cdim_max": None, "inca": 1, "lda": None, "ldp": None, "n_extra": 0, "kappa": 1.0}
+    args = {"cdim": None, "cdim_max": None, "inca": None, "lda": None, "ldp": None, "n_extra": 0, "kappa": 1.0}
     for part in (p for p in text.split(",") if p.strip()):
         key, _, value = part.partition("=")
         key = key.strip()
@@ -135,31 +137,58 @@ def parse_call(text: str) -> dict:
         raise SystemExit("--blis needs cdim")
     args["cdim_max"] = args["cdim_max"] or args["cdim"]
     args["ldp"] = args["ldp"] or args["cdim_max"]
-    if args["lda"] is None:
-        if 1 != args["inca"]:
-            raise SystemExit("--blis: lda - where inca isn't 1, the columns' stride isn't cdim")
-        args["lda"] = args["cdim"]
     if args["cdim_max"] < args["cdim"] or args["ldp"] < args["cdim_max"]:
         raise SystemExit("--blis: cdim <= cdim_max <= ldp")
-    if args["inca"] < 1 or args["lda"] < 1:
-        raise SystemExit("--blis: inca and lda are strides of at least 1 element (1: the next element)")
+    for key in ("inca", "lda"):
+        if args[key] is not None and args[key] < 1:
+            raise SystemExit("--blis: inca and lda are strides of at least 1 element (1: the next element)")
     return args
 
 
-def check_call(call: dict, ns: list):
+def resolve(call: dict, ns: list) -> dict:
     """
-    The elements apart for every n timed: the columns adjacent (inca 1) at
-    least cdim apart, the rows adjacent (lda 1) at least the most columns
-    apart; else one stride nesting the other
+    The strides completed by the layout they give and checked: A's elements
+    apart for every n timed - its columns contiguous (inca 1) at least cdim
+    apart, its rows contiguous (lda 1) at least the most columns apart, else
+    one stride nesting the other
     """
-    n = max(ns)
-    inca, lda, cdim = call["inca"], call["lda"], call["cdim"]
+    call = dict(call)
+    n, cdim = max(ns), call["cdim"]
+    inca, lda = call["inca"], call["lda"]
+    if 1 == inca and 1 == lda:
+        raise SystemExit("--blis: inca 1 and lda 1 - A's columns and rows both contiguous, they overlap: for its "
+                         f"columns contiguous (vec cases) lda their stride, at least cdim ({cdim}); for its rows "
+                         f"contiguous (trans, gather) inca their stride, at least n ({n})")
+    if inca is None:
+        inca = n if 1 == lda else 1                 # rows as tight as they go, or columns contiguous
+    if lda is None:
+        if 1 != inca:
+            raise SystemExit(f"--blis: lda - with inca {inca} A's columns aren't contiguous; their stride")
+        lda = cdim                                  # columns as tight as they go
     if 1 == inca and lda < cdim:
-        raise SystemExit(f"--blis: lda {lda} - the columns overlap; at least cdim, {cdim}")
-    if 1 == lda and 1 != inca and inca < n:
-        raise SystemExit(f"--blis: inca {inca} - the rows overlap at {n} columns; at least {n}")
+        raise SystemExit(f"--blis: lda {lda} - A's columns contiguous (inca 1) overlap; lda at least cdim, {cdim}")
+    if 1 == lda and inca < n:
+        raise SystemExit(f"--blis: inca {inca} - A's rows contiguous (lda 1) overlap at {n} columns; "
+                         f"inca at least {n}")
     if 1 != inca and 1 != lda and lda < cdim * inca and inca < n * lda:
         raise SystemExit(f"--blis: inca {inca}, lda {lda} - the elements overlap at {n} columns")
+    call["inca"], call["lda"] = inca, lda
+    return call
+
+
+#: what a call needs to fall into a case of each kind - the dispatch's guards
+NEEDS = {"vec": ("A's columns contiguous (inca 1), n_max n",
+                 lambda c: 1 == c["inca"] and 0 == c["n_extra"]),
+         "gather": ("A's rows contiguous (lda 1), n_max n",
+                    lambda c: 1 == c["lda"] and 0 == c["n_extra"]),
+         "trans": ("A's rows contiguous (lda 1) and a full panel: cdim_max cdim, ldp cdim, n_max n",
+                   lambda c: 1 == c["lda"] and c["cdim_max"] == c["cdim"] and c["ldp"] == c["cdim"]
+                   and 0 == c["n_extra"])}
+
+
+def reachable(call: dict, kinds: dict) -> list:
+    """the cases (by name) a call can fall into, of kinds {name: kind}"""
+    return [name for name, kind in kinds.items() if kind in NEEDS and NEEDS[kind][1](call)]
 
 
 def instrument(dispatch: str, built: list, name: str, ch: str) -> str:
@@ -251,7 +280,7 @@ def report_blis(runs: dict, built: list, call: dict, unit: str, esize: int):
     unit_of = "cycle" if "cycles" == unit else unit
     print(f"BLIS packm: cdim {call['cdim']} of {call['cdim_max']}, ldp {call['ldp']}, kappa {call['kappa']}, "
           f"n_max n + {call['n_extra']}")
-    bad = False
+    bad = only_ref = False
     for v in sorted(per):
         r = by[v]
         print(f"variant {v} {r['settings']}:")
@@ -260,12 +289,15 @@ def report_blis(runs: dict, built: list, call: dict, unit: str, esize: int):
             case, refs, wrong, inca, lda = pts[0][1:]
             which = r["cases"][case] if case >= 0 else "-"
             how = (f"{which}" + (f" + reference x{refs}" if refs else "")) if case >= 0 else \
-                f"reference x{refs}"
+                f"reference x{refs} (no case)"
+            only_ref = only_ref or case < 0
             nbytes = (call["cdim"] * n + call["cdim_max"] * (n + call["n_extra"])) * esize
             bad = bad or wrong > 0
             print(f"  n {n:6} (inca {inca}, lda {lda}): {how:28} {t:10.1f} {unit} a call, "
                   f"{t / n:7.2f} a column, {nbytes / t:7.2f} B a {unit_of}"
                   + (f" - {wrong} WRONG" if wrong else ""))
+    if only_ref:
+        print("NOTE: where a line says no case, no case packed the call - its numbers are the reference's")
     if bad:
         print("WRONG: a panel differs from the reference's")
     return not bad

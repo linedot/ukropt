@@ -171,13 +171,33 @@ class test_blislike(unittest.TestCase):
         self.assertIn("reference x1", self.sweep(dpackm, "--blis", "cdim=3,inca=1024,lda=1,ldp=3", "--loop", "64", flags))
 
     def test_strides_as_blis(self):
-        # strides in elements, as BLIS's: none below 1, none overlapping
-        from ukropt.blislike import parse_call, check_call
-        self.assertEqual(8, parse_call("cdim=8")["lda"])
-        for call, ns in (("cdim=4,inca=0,lda=1", [64]), ("cdim=4,inca=1,lda=0", [64]),
+        # strides in elements, as BLIS's: none below 1, none overlapping; the
+        # layout they give completing them
+        from ukropt.blislike import parse_call, resolve
+        self.assertEqual((1, 8), tuple(resolve(parse_call("cdim=8"), [64])[k] for k in ("inca", "lda")))
+        self.assertEqual((64, 1), tuple(resolve(parse_call("cdim=4,lda=1"), [16, 64])[k] for k in ("inca", "lda")))
+        for call, ns in (("cdim=4,inca=0,lda=1", [64]), ("cdim=4,inca=1,lda=0", [64]), ("cdim=4,inca=1,lda=1", [8]),
                          ("cdim=4,inca=64,lda=1", [65]), ("cdim=8,inca=1,lda=4", [16]), ("cdim=4,inca=2", [8])):
             with self.subTest(call=call), self.assertRaises(SystemExit):
-                check_call(parse_call(call), ns)
+                resolve(parse_call(call), ns)
+
+    def test_case_kept_must_be_reachable(self):
+        # A's columns contiguous can't fall into a trans case: refused, not
+        # the reference timed; its rows contiguous (lda 1) fall into trans4
+        if not (shutil.which("gcc") and has_avx2()):
+            self.skipTest("needs gcc and an AVX2 CPU")
+        configs = ukrgen_configs()
+        if configs is None:
+            self.skipTest("no ukrgen checkout")
+        dpackm = os.path.join(configs, "avx2", "fma_bc_blocks", "dpackm.yaml")
+        r = subprocess.run([sys.executable, "-m", "ukropt.sweep", dpackm, "--family", "pk", "--blis",
+                            "cdim=4,inca=1,lda=4", "--case", "trans", "--loop", "64", "--out", "/nonexistent"],
+                           capture_output=True, text=True, timeout=600)
+        self.assertNotEqual(0, r.returncode)
+        self.assertIn("falls into none of the cases kept", r.stderr)
+        self.assertRegex(self.sweep(os.path.join("avx2", "fma_bc_blocks", "dpackm.yaml"), "--blis", "cdim=4,lda=1",
+                                    "--case", "trans", "--loop", "64", "--cflags=-O2 -mavx2 -mfma"),
+                         r"n +64 \(inca 64, lda 1\): trans4 ")
 
     def test_dispatch_swept(self):
         # the dispatch's order a grid's: gather first, or the transpose first

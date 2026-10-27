@@ -632,15 +632,29 @@ def blis_mode(args, kind: str):
     """
     if "packm" != kind:
         sys.exit("--blis: a packm family file")
-    call = blislike.parse_call(args.blis)
     ns = [n for n in (args.loop or args.k).split(",") if n]
-    blislike.check_call(call, [int(n) for n in ns])
+    call = blislike.resolve(blislike.parse_call(args.blis), [int(n) for n in ns])
     dtype = args.dt or dtype_of(args.config)
     cfg = configuration.from_files({(kind, dtype): args.config})
     grid = yaml.safe_load(open(args.grid)) if args.grid else {}
     variants = combinations(grid, args.sample, args.seed) if grid else [{}]
-    # --case: the case kinds kept (vec,trans) - the dispatch falls into what's left
+    # --case: the cases kept by name or kind (vec,trans) - the dispatch falls
+    # into what's left; a call none of them can take refused (its numbers
+    # would be the reference's), one no case can take said
     keep = {c.strip() for c in (args.case or "").split(",") if c.strip()}
+    base = next(f for f in cfg.families if f.name == args.family)
+    kinds = {name: kind for name, kind in base.case_kinds.items()
+             if not keep or name in keep or kind in keep}
+    if keep and not kinds:
+        sys.exit(f"--case: no case of {args.family} is named or of a kind {sorted(keep)}: "
+                 f"{sorted(base.case_kinds)}")
+    if not blislike.reachable(call, kinds):
+        why = "; ".join(f"{name} ({kind}) needs {blislike.NEEDS[kind][0]}" for name, kind in kinds.items()
+                        if kind in blislike.NEEDS)
+        if keep:
+            sys.exit(f"--case: the call (inca {call['inca']}, lda {call['lda']}, cdim {call['cdim']} of "
+                     f"{call['cdim_max']}, ldp {call['ldp']}) falls into none of the cases kept - {why}")
+        print(f"note: no case packs this call - the reference's numbers ({why})", file=sys.stderr)
     jobs = [(i, v, args.config, dtype, args.family, keep) for i, v in enumerate(variants)]
     from concurrent.futures import ProcessPoolExecutor
     with ProcessPoolExecutor(max_workers=args.jobs) as pool:
