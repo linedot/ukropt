@@ -238,6 +238,9 @@ def build_blis_variant(job):
     if "vec-rest" in flow:
         # the rows a vec or gather case packs beyond its own
         fam.vec_rest = flow.pop("vec-rest")
+    if "vec-tail" in flow:
+        # the rows a vec case leaves: a kernel ending at cdim, or the reference
+        fam.vec_tail = flow.pop("vec-tail")
     cases = []
     for case, ms, params in fam.cases:
         # --case: kept by name or kind
@@ -256,7 +259,7 @@ def build_blis_variant(job):
     ch = {"FP64": "d", "FP32": "s"}[dtype]
     return {"i": i, "settings": settings, "name": name, "ch": ch,
             "asm": [(asm_symbol(k), asm_source(k)) for k in built],
-            "dispatch": instrument(packm_dispatch(name, dtype, built, fam.dispatch, fam.vec_rest),
+            "dispatch": instrument(packm_dispatch(name, dtype, built, fam.dispatch, fam.vec_rest, fam.vec_tail),
                                    built, name, ch),
             "helpers": vl_helpers(built, make_generator(cfg.isa)),
             # each case as its symbol ends: its kind and rows (vec8, trans4)

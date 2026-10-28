@@ -255,14 +255,14 @@ class test_blislike(unittest.TestCase):
         if not (shutil.which("gcc") and has_avx2()):
             self.skipTest("needs gcc and an AVX2 CPU")
         with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as grid:
-            grid.write("vec-rest: [16, 0]\n")
+            grid.write("vec-rest: [16, 0]\nvec-tail: [reference]\n")
         try:
             said = self.sweep(os.path.join("avx2", "fma_bc_blocks", "dpackm.yaml"), "--blis", "cdim=9",
                               "--grid", grid.name, "--loop", "64", "--cflags=-O2 -mavx2 -mfma")
         finally:
             os.unlink(grid.name)
-        self.assertRegex(said, r"variant 0 \{'vec-rest': 16\}:\n +n +64 [^\n]*: vec8 \+ reference x1")
-        self.assertRegex(said, r"variant 1 \{'vec-rest': 0\}:\n +n +64 [^\n]*: reference x1 \(no case\)")
+        self.assertRegex(said, r"variant 0 \{'vec-rest': 16, 'vec-tail': 'reference'\}:\n +n +64 [^\n]*: vec8 \+ reference x1")
+        self.assertRegex(said, r"variant 1 \{'vec-rest': 0, 'vec-tail': 'reference'\}:\n +n +64 [^\n]*: reference x1 \(no case\)")
 
     def test_structfuse_gridded_under_qemu(self):
         # a grid toggling structfuse on RVV's trans cases, run under qemu
