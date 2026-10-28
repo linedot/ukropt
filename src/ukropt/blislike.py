@@ -257,11 +257,15 @@ def build_blis_variant(job):
     if not built:
         return {"i": i, "settings": settings, "error": str(skipped[0][2])[:200] if skipped else "nothing built"}
     ch = {"FP64": "d", "FP32": "s"}[dtype]
+    # each kernel's vector length function named before the dispatch reads it:
+    # an RVV LMUL's VL is its group's - the dispatch read ukrgen_vl's (one
+    # register's) and called vec4v at m2 for 8 rows, which packs 16
+    helpers = vl_helpers(built, make_generator(cfg.isa))
     return {"i": i, "settings": settings, "name": name, "ch": ch,
             "asm": [(asm_symbol(k), asm_source(k)) for k in built],
             "dispatch": instrument(packm_dispatch(name, dtype, built, fam.dispatch, fam.vec_rest, fam.vec_tail),
                                    built, name, ch),
-            "helpers": vl_helpers(built, make_generator(cfg.isa)),
+            "helpers": helpers,
             # each case as its symbol ends: its kind and rows (vec8, trans4)
             "cases": [k.symbol.rsplit("_", 1)[1] for k in built],
             # each kernel's case: its name and kind (what --case keeps)

@@ -264,6 +264,39 @@ class test_blislike(unittest.TestCase):
         self.assertRegex(said, r"variant 0 \{'vec-rest': 16, 'vec-tail': 'reference'\}:\n +n +64 [^\n]*: vec8 \+ reference x1")
         self.assertRegex(said, r"variant 1 \{'vec-rest': 0, 'vec-tail': 'reference'\}:\n +n +64 [^\n]*: reference x1 \(no case\)")
 
+    def test_lmul_under_qemu(self):
+        # RVV's vec case at LMUL 2 (vec2v: one m2 group): the dispatch reading
+        # the kernels' own vector length functions - it read one register's
+        # and called vec4v (16 rows at VLEN 256) for 8: wrong panels
+        import re
+        cc, cflags = TARGETS["rvv"]
+        if not (shutil.which(cc) and shutil.which("qemu-riscv64-static")):
+            self.skipTest("needs the RISC-V compiler and qemu")
+        configs = ukrgen_configs()
+        if configs is None:
+            self.skipTest("no ukrgen checkout")
+        text = open(os.path.join(configs, "rvv", "fma_vf", "dpackm.yaml")).read()
+        text, n = re.subn(r"(- kind: vec\n(?:  name: \w+\n)?  m: [^\n]+\n)", r"\1  lmul: 2\n", text, count=1)
+        self.assertEqual(1, n)
+        # the sweep knows a packm family by its file's name
+        where = tempfile.mkdtemp()
+        cfg_path = os.path.join(where, "dpackm.yaml")
+        open(cfg_path, "w").write(text)
+        try:
+            for cdim, case in ((8, "vec2v"), (16, "vec4v")):
+                with self.subTest(cdim=cdim), tempfile.TemporaryDirectory() as out:
+                    r = subprocess.run([sys.executable, "-m", "ukropt.sweep", cfg_path, "--family", "pk",
+                                        "--blis", f"cdim={cdim},inca=1,lda=1031", "--loop", "16",
+                                        "--cc", cc, f"--cflags={cflags} -static",
+                                        "--runner", "qemu-riscv64-static -cpu rv64,v=true,vlen=256,elen=64",
+                                        "--reps", "1", "--iterations", "1", "--out", out],
+                                       capture_output=True, text=True, timeout=1800)
+                    self.assertEqual(0, r.returncode, r.stderr[-2000:])
+                    self.assertRegex(r.stdout, rf": {case} ")
+                    self.assertNotIn("WRONG", r.stdout)
+        finally:
+            shutil.rmtree(where)
+
     def test_structfuse_gridded_under_qemu(self):
         # a grid toggling structfuse on RVV's trans cases, run under qemu
         # (--runner): every panel the reference's, the +structfuse variant's

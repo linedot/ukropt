@@ -252,8 +252,10 @@ def build_variant(job):
         return {"i": i, "settings": settings, "error": skipped[0][2][:200]}
     k = ok[0]
     ctype = CTYPE[dtype]
+    # its vector length function named before the wrapper and sizes read it
+    helpers = vl_helpers([k], make_generator(cfg.isa))
     return {"i": i, "settings": settings, "asm": asm_source(k), "wrapper": gemm_wrapper(k),
-            "helpers": vl_helpers([k], make_generator(cfg.isa)), "symbol": k.symbol,
+            "helpers": helpers, "symbol": k.symbol,
             "mr": c_expr(k.mr, ctype, k.vl_fn), "nr": c_expr(k.nr, ctype, k.vl_fn)}
 
 
