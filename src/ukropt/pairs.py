@@ -9,6 +9,10 @@ An experiment is a loop body of ISA-neutral roles, repeated:
                      fmla by element, SVE fmla by block lane. x86 has no
                      scalar form: S is a vector there (as after a broadcast)
     vfma C A B       C += A * B, vector by vector
+    sfma C A B       C += A * B with all three in the scalar file: F's and D's
+                     fmadd.d/fmadd.s, the scalar kernels' instruction (an ISA
+                     whose FP registers are its vector registers has no such
+                     form; there fma/vfma are the vector ones)
     vload V [P]      a vector load: from pointer P, else the buffer's start
     sload S OFF [P]  a scalar operand loaded (fld, ldr d, vmovsd) at OFF
                      bytes from pointer P, else from the buffer's start
@@ -94,9 +98,17 @@ BUILTIN = {
                   ["fma c{i%C} v{(i//4)%4} s{i%S}", {"op": "vload v{(i//4+2)%4}", "every": 4}], 32),
     "fma+iadd": ("an FMA and an integer add in turn",
                  ["fma c{i%C} a{i%2} s{i%S}", "iadd g{i%2} 8"], 32),
+    # scalar F and D: every operand in the FP file, no vector register at all
+    "sfma": ("independent scalar FMAs, every operand in the FP file",
+             ["sfma s{i%S} t{i%T} t{(i+1)%T}"], 32),
+    "sfma-chain-1": ("one scalar dependency chain: cycles per FMA = its latency",
+                     ["sfma s0 t0 t1"], 32),
+    "sfma-chain-4": ("four scalar chains", ["sfma s{i%4} t0 t1"], 32),
+    "sfma+fld": ("a scalar FMA and an fld in turn (the load feeds the source)",
+                 ["sfma s{i%S} t{i%T} t{(i+1)%T}", "sload t{i%T} {8*(i%T)}"], 32),
 }
 
-KINDS = {"fma": (3,), "vfma": (3,), "vload": (1, 2), "sload": (2, 3), "iadd": (2,)}
+KINDS = {"fma": (3,), "vfma": (3,), "sfma": (3,), "vload": (1, 2), "sload": (2, 3), "iadd": (2,)}
 BUF_BYTES = 2 << 20
 TEMPLATE = re.compile(r"\{([^{}]+)\}")
 REGNAME = re.compile(r"[a-z][0-9]+$")
@@ -264,11 +276,16 @@ class isa_ops:
         self.scalar_tag = "vreg" if "vreg" in self.gen.get_reg_tracker().pool("freg") else "freg"
         big = self.nvregs >= 32
         self.room = {"C": 16 if big else 8, "S": 8 if big else 4, "T": 4 if big else 2}
+        if not self.nvregs:
+            # a generator with no vectors at all (riscv64's F and D): every
+            # experiment's operands live in the FP file, which has 32 registers
+            self.room.update({"S": 16, "T": 8})
         if not self.gen.is_vla:
             self.room["VB"] = self.gen.simd_size
         # the predicate the ISA's setup keeps all-true (SVE's, SME's p0), if any
         self.mask = self.gen.isa_setup().all_true_predicate(rt=None, dt=self.dt)
         self.fma_form = self._find_fma_form()
+        self.scalar_fma = self._find_scalar_fma()
 
     def _find_fma_form(self) -> dict | None:
         """
@@ -277,6 +294,10 @@ class isa_ops:
         """
         from asmgen.asmblocks.op.operand import operand_modifier as om
         g, d = self.gen, self.dt
+        if not self.nvregs:
+            # no vector file to take the vector operands from: the
+            # all-scalar form is _find_scalar_fma's
+            return None
         s = g.freg(2, d) if "freg" == self.scalar_tag else g.vreg(2)
         forms = []
         if "freg" == self.scalar_tag:
@@ -289,6 +310,24 @@ class isa_ops:
             if g.fma.fits(adreg=g.vreg(1), bdreg=s, cdreg=g.vreg(3), a_dt=d, b_dt=d, c_dt=d, **form):
                 return form
         return None
+
+    def _find_scalar_fma(self) -> dict | None:
+        """
+        Whether an FMA exists with all three operands in the scalar file: on
+        RISC-V that is F's and D's fmadd.d/fmadd.s (and no modifiers), which
+        the scalar kernels use. Only an ISA whose FP registers are their own
+        file has one - where they are the vector registers, fma_vv is the
+        vector form and there is nothing scalar to add.
+        """
+        if "freg" != self.scalar_tag:
+            return None
+        g, d = self.gen, self.dt
+        call = dict(adreg=g.freg(1, d), bdreg=g.freg(2, d), cdreg=g.freg(3, d),
+                    a_dt=d, b_dt=d, c_dt=d)
+        try:
+            return {} if g.fma.fits(**call) else None
+        except NotImplementedError:
+            return None
 
     def _masked(self) -> dict:
         from asmgen.asmblocks.op.optransform import optransform_modifier
@@ -307,6 +346,15 @@ class isa_ops:
             return self.fma_vv(c, a, s)
         d = self.dt
         return self.gen.fma(adreg=a, bdreg=s, cdreg=c, a_dt=d, b_dt=d, c_dt=d, **self.fma_form)
+
+    def fma_scalar(self, c, a, b) -> str:
+        """
+        c = a * b + c with every operand in the scalar file (fmadd.d)
+        """
+        if self.scalar_fma is None:
+            sys.exit(f"{self.isa}: no FMA of FP-register operands through asmgen")
+        d = self.dt
+        return self.gen.fma(adreg=a, bdreg=b, cdreg=c, a_dt=d, b_dt=d, c_dt=d, **self.scalar_fma)
 
     def vload(self, v, areg) -> str:
         from asmgen.asmblocks.op.opmem import opmem_modifier
@@ -422,6 +470,8 @@ class isa_ops:
                 loop += self.fma_s(reg(ops[0]), reg(ops[1]), reg(ops[2]))
             elif "vfma" == kind:
                 loop += self.fma_vv(reg(ops[0]), reg(ops[1]), reg(ops[2]))
+            elif "sfma" == kind:
+                loop += self.fma_scalar(reg(ops[0]), reg(ops[1]), reg(ops[2]))
             elif "vload" == kind:
                 loop += self.vload(reg(ops[0]), reg(ops[1]) if len(ops) > 1 else buf)
             elif "sload" == kind:
@@ -565,7 +615,9 @@ def main():
         ops.room["VB"] = args.vector_bytes
     out = args.out or f"ukrpairs-{args.isa}"
     os.makedirs(out, exist_ok=True)
-    form = ("a scalar-operand form" if ops.fma_form else "vector FMAs (no scalar form: S a vector)")
+    form = ("a scalar-operand form" if ops.fma_form else
+            "an all-scalar form (fmadd)" if ops.scalar_fma else
+            "vector FMAs (no scalar form: S a vector)")
     print(f"# {args.isa}: {ops.nvregs} vector registers, room C={ops.room['C']} S={ops.room['S']} "
           f"T={ops.room['T']}; fma as {form}", file=sys.stderr)
     names, texts, facts, abouts = [], [], {}, {}
